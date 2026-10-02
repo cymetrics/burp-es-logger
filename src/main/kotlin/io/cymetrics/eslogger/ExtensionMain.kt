@@ -35,7 +35,7 @@ class ExtensionMain : BurpExtension {
             try {
                 WebSocketCaptureHandler.register(api, writer)
             } catch (t: Throwable) {
-                log.logToError("[es-logger] WebSocket 註冊失敗（可能是 Montoya 版本差異）：${t.message}")
+                log.logToError("[es-logger] WebSocket capture unavailable on this Montoya version: ${t.message}")
             }
         }
 
@@ -47,14 +47,21 @@ class ExtensionMain : BurpExtension {
 
         // 關閉 / 重載時 flush
         api.extension().registerUnloadingHandler {
-            log.logToOutput("[es-logger] unloading, flushing…")
+            log.logToOutput("[es-logger] unloading — draining the queue and flushing pending records")
             writer.stop()
             uploader.stop()
             store.close()
         }
 
-        val mode = if (config.persistLocally) "SQLite ${config.dbPath}" else "純記憶體（不落地）"
-        log.logToOutput("[es-logger] 已載入。待上傳佇列：$mode　|　Index：${config.indexName()}")
-        log.logToOutput("[es-logger] 記得到 ES Logger 分頁填入 Endpoint / API Key / Tester / Project 後按儲存。")
+        val spool = if (config.persistLocally) "SQLite at ${config.dbPath}" else "in-memory (nothing written to disk)"
+        val fastMode = if (config.fastMode) "on (excluded static assets are not hashed)" else "off (everything is hashed)"
+        log.logToOutput("[es-logger] loaded — spool: $spool | index: ${config.indexName()} | fast mode: $fastMode")
+        // 只在真的還沒設定時才提醒，不要每次載入都嘮叨
+        if (config.esEndpoint.isBlank() || config.esApiKey.isBlank()) {
+            log.logToOutput(
+                "[es-logger] not uploading yet — set the endpoint, API key, tester and project " +
+                    "in the ES Logger tab, then save"
+            )
+        }
     }
 }

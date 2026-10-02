@@ -72,7 +72,7 @@ class ElasticUploader(
                 break
             } catch (t: Throwable) {
                 lastError = t.message ?: t.toString()
-                logging.logToError("[es-logger] upload error: $lastError (backoff ${backoff}ms)")
+                logging.logToError("[es-logger] upload failed, retrying in ${backoff}ms: $lastError")
                 try { Thread.sleep(backoff) } catch (_: InterruptedException) { break }
                 backoff = (backoff * 2).coerceAtMost(60_000L)
             }
@@ -137,10 +137,12 @@ class ElasticUploader(
         lastUploadAt = Instant.now()
         lastUploadCount = succeeded.size
         lastError = if (succeeded.size == batch.size) "" else
-            "部分失敗：${batch.size - succeeded.size}/${batch.size} 筆未成功（詳見 Extensions log）"
+            "${batch.size - succeeded.size}/${batch.size} documents rejected — see the Extensions log"
 
         if (succeeded.size < batch.size) {
-            logging.logToError("[es-logger] ${batch.size - succeeded.size} docs failed in bulk, will retry next round")
+            logging.logToError(
+                "[es-logger] ${batch.size - succeeded.size} of ${batch.size} documents were rejected, retrying next round"
+            )
         }
         return true
     }
@@ -171,11 +173,11 @@ class ElasticUploader(
                     ok.add(row)
                 } else {
                     val err = create.get("error")?.toString()?.take(200) ?: "status=$status"
-                    logging.logToError("[es-logger] doc ${row.docId} failed: $err")
+                    logging.logToError("[es-logger] document ${row.docId} (seq ${row.seq}) rejected: $err")
                 }
             }
         } catch (t: Throwable) {
-            logging.logToError("[es-logger] cannot parse bulk response: ${t.message}")
+            logging.logToError("[es-logger] could not parse the _bulk response: ${t.message}")
         }
         return ok
     }

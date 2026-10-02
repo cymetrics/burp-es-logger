@@ -69,7 +69,7 @@ class RecordWriter(
     fun start() {
         running = true
         thread = Thread({ loop() }, "es-logger-writer").apply { isDaemon = true; start() }
-        logging.logToOutput("[es-logger] writer started, session=$sessionId, chain resumes at seq=$curSeq")
+        logging.logToOutput("[es-logger] writer started — session $sessionId, chain resumes at seq $curSeq")
     }
 
     /**
@@ -105,7 +105,7 @@ class RecordWriter(
             } catch (ie: InterruptedException) {
                 break
             } catch (t: Throwable) {
-                logging.logToError("[es-logger] writer error: ${t.message}")
+                logging.logToError("[es-logger] writer error, continuing: ${t.message}")
             }
         }
         drainRemaining()
@@ -127,7 +127,9 @@ class RecordWriter(
         try {
             flushWrites()
         } catch (t: Throwable) {
-            logging.logToError("[es-logger] 收尾寫入失敗，${writeBuffer.size} 筆未落檔：${t.message}")
+            logging.logToError(
+                "[es-logger] final flush failed — ${writeBuffer.size} record(s) were not stored: ${t.message}"
+            )
         }
     }
 
