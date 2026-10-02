@@ -55,6 +55,8 @@ class ExtensionMain : BurpExtension {
             api.userInterface().applyThemeToComponent(panel)
         }
         api.userInterface().registerSuiteTab("ES Logger", panel)
+        // 註冊成功之後才啟動，這樣中途失敗不會留下一個沒人停得掉的計時器
+        SwingUtilities.invokeAndWait { panel.start() }
 
         // 關閉 / 重載時 flush
         api.extension().registerUnloadingHandler {

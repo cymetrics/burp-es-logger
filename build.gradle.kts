@@ -32,6 +32,9 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // 在測試 JVM 啟動時就決定，而不是在某個測試方法裡設。GraphicsEnvironment 會快取
+    // 第一次的判斷結果，哪個測試先碰到 AWT 就定了，順序一變就壞。
+    systemProperty("java.awt.headless", "true")
     testLogging {
         events("passed", "failed", "skipped")
     }

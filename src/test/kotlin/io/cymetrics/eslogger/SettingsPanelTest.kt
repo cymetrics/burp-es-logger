@@ -9,7 +9,7 @@ import io.cymetrics.eslogger.ui.SettingsPanel
 import io.cymetrics.eslogger.upload.ElasticUploader
 import javax.swing.SwingUtilities
 import kotlin.test.Test
-import kotlin.test.assertTrue
+import kotlin.test.assertNotNull
 
 /**
  * 面板只要能被建構出來就值得測。
@@ -29,19 +29,24 @@ class SettingsPanelTest {
     }
 
     @Test
-    fun `the panel can be constructed and disposed`() {
-        System.setProperty("java.awt.headless", "true")
+    fun `the panel can be constructed and started`() {
         var built: SettingsPanel? = null
         var failure: Throwable? = null
         SwingUtilities.invokeAndWait {
             try {
-                built = buildPanel()
+                built = buildPanel().also { it.start() }
             } catch (t: Throwable) {
                 failure = t
             }
         }
-        failure?.let { throw AssertionError("constructing the settings panel threw ${it}", it) }
-        assertTrue(built != null)
-        SwingUtilities.invokeAndWait { built!!.dispose() }
+        failure?.let { throw AssertionError("constructing the settings panel failed", it) }
+        val panel = assertNotNull(built, "the panel was not constructed")
+        try {
+            // rebuild() 以 invokeLater 收尾，排空佇列才看得到那段的例外
+            SwingUtilities.invokeAndWait { }
+        } finally {
+            // 無論如何都要停掉計時器，否則它會在共用的測試 JVM 裡每 5 秒觸發到結束
+            SwingUtilities.invokeAndWait { panel.dispose() }
+        }
     }
 }

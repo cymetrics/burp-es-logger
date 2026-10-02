@@ -86,7 +86,7 @@ class ElasticUploader(
         val deadline = System.currentTimeMillis() + timeoutMillis
         while (store.pendingCount > 0 && System.currentTimeMillis() < deadline) {
             try {
-                if (!flushOnce()) break
+                if (flushOnce() != FlushResult.SENT) break
             } catch (t: Throwable) {
                 logging.logToError("[es-logger] final upload attempt failed: ${t.message}")
                 break
@@ -112,7 +112,7 @@ class ElasticUploader(
                     Thread.sleep(config.uploadIntervalSeconds * 1000L)
                     continue
                 }
-                val uploadedAny = flushOnce()
+                val uploadedAny = flushOnce() == FlushResult.SENT
                 if (outageReported) {
                     outageReported = false
                     logging.raiseInfoEvent("ES Logger: uploads have recovered")
@@ -141,16 +141,21 @@ class ElasticUploader(
      * 呼叫端的 loop 在回傳 true 時不會 sleep，所以積壓會被連續的 _bulk 排掉，
      * `uploadIntervalSeconds` 只是閒置時的輪詢週期，不是吞吐上限。
      */
+    /** flushOnce 的結果。「沒東西可送」和「別人正在送」必須分得出來。 */
+    enum class FlushResult { SENT, EMPTY, BUSY }
+
     private val flushLock = java.util.concurrent.locks.ReentrantLock()
 
     /**
      * 同時只允許一個 flush。UI 的「立即上傳」按鈕、背景執行緒與卸載時的 drain 都會呼叫，
      * 併行執行會讓兩邊抓到同一批、把計數器與批次二分邏輯互相洗掉。
      */
-    fun flushOnce(): Boolean {
-        if (!flushLock.tryLock()) return false
+    fun flushOnce(): FlushResult {
+        // 拿不到鎖代表背景執行緒正在送。若也回報「沒東西可送」，使用者會看到
+        // 狀態列說沒資料、但上方的待上傳磚顯示一萬筆。
+        if (!flushLock.tryLock()) return FlushResult.BUSY
         try {
-            return flushBatch()
+            return if (flushBatch()) FlushResult.SENT else FlushResult.EMPTY
         } finally {
             flushLock.unlock()
         }

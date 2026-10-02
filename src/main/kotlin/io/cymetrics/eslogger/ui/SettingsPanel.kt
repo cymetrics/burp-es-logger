@@ -92,7 +92,7 @@ class SettingsPanel(
      * 必須宣告在 init 區塊之前。Kotlin 依宣告順序初始化屬性，宣告在 init 後面的話，
      * init 裡呼叫 startStatsTimer() 時它還是 null —— 編譯不會抱怨，載入擴充時才 NPE。
      */
-    private val statsTimer = Timer(5000) { refreshStats() }.apply { isRepeats = true }
+    private val statsTimer = Timer(STATS_REFRESH_MS) { refreshStats() }
 
     // 三個區塊的左右留白會隨視窗寬度改變，把內容維持成一個置中的欄。
     private lateinit var headerPanel: JPanel
@@ -127,18 +127,36 @@ class SettingsPanel(
             override fun componentResized(e: ComponentEvent) = applyGutters()
         })
 
-        rebuild()
-        startStatsTimer()
+    }
+
+    /**
+     * 建構之後、分頁註冊之後才呼叫。
+     *
+     * 刻意不在建構子裡啟動計時器：Swing 的 TimerQueue 會強參照執行中的 Timer，
+     * 若建構子啟動了它、而後面的註冊步驟拋例外，[dispose] 的註冊就永遠不會發生，
+     * 計時器會活到 Burp 關閉為止，連帶讓面板與其中的 API key 無法回收。
+     * 這也讓三個長壽元件（writer / uploader / panel）有一致的 start-stop 形狀。
+     */
+    fun start() {
+        // 先決定初始狀態再重建：反過來的話，rebuild 內的 refreshStats 會先把上傳錯誤
+        // 記進 lastSeenError，接著被初始狀態覆蓋，之後每一輪都認為「這個錯誤報過了」。
         showInitialStatus()
+        rebuild()
+        statsTimer.start()
     }
 
     /** 重新套用文案並重建整個版面（語言切換時用）。 */
     private fun rebuild() {
         applyTexts()
+        // 先全部建好再替換。先 removeAll() 的話，建構中途拋例外會留下一個永久空白的
+        // 分頁，而且欄位參照會是新舊混雜，連重新整理都救不回來。
+        val newHeader = buildHeader()
+        val newScroll = buildForm()
+        val newFooter = buildFooter()
         removeAll()
-        headerPanel = buildHeader()
-        scroll = buildForm()
-        footerPanel = buildFooter()
+        headerPanel = newHeader
+        scroll = newScroll
+        footerPanel = newFooter
         add(headerPanel, BorderLayout.NORTH)
         add(scroll, BorderLayout.CENTER)
         add(footerPanel, BorderLayout.SOUTH)
@@ -300,11 +318,15 @@ class SettingsPanel(
             setStatus(Tone.IDLE) { it.statusUploading }
             Thread {
                 val result: Pair<Tone, (Strings) -> String> = try {
-                    if (uploader.flushOnce()) {
-                        val n = uploader.lastUploadCount
-                        Tone.OK to { st: Strings -> st.sentBatch(n) }
-                    } else {
-                        Tone.IDLE to { st: Strings -> st.statusNothingToUpload }
+                    when (uploader.flushOnce()) {
+                        ElasticUploader.FlushResult.SENT -> {
+                            val n = uploader.lastUploadCount
+                            Tone.OK to { st: Strings -> st.sentBatch(n) }
+                        }
+                        ElasticUploader.FlushResult.EMPTY ->
+                            Tone.IDLE to { st: Strings -> st.statusNothingToUpload }
+                        ElasticUploader.FlushResult.BUSY ->
+                            Tone.IDLE to { st: Strings -> st.statusUploadBusy }
                     }
                 } catch (t: Throwable) {
                     val msg = t.message
@@ -485,7 +507,15 @@ class SettingsPanel(
             // 上傳就此靜默停止，而狀態列還顯示「已儲存」—— 這種失敗完全看不出來。
             var clamped = false
             fun clamp(field: JTextField, current: Int, min: Int, max: Int): Int {
-                val parsed = field.text.trim().toIntOrNull() ?: return current
+                // 解析不出來（空白、文字、超過 Int 範圍）也算「被調整」：原本會靜靜沿用舊值，
+                // 畫面上卻還留著使用者打的數字，狀態列顯示綠色的「已儲存」——
+                // 使用者會以為 3000000000 生效了。
+                val parsed = field.text.trim().toIntOrNull()
+                if (parsed == null) {
+                    clamped = true
+                    field.text = current.toString()
+                    return current
+                }
                 val bounded = parsed.coerceIn(min, max)
                 if (bounded != parsed) {
                     clamped = true
@@ -536,9 +566,13 @@ class SettingsPanel(
             } ?: "—"
         )
 
-        // 只在錯誤「變化」時覆寫狀態列，才不會把剛剛的操作結果洗掉。
+        // 只在錯誤「變化」時覆寫狀態列，才不會把剛剛的操作結果洗掉 —— 但只要錯誤還在、
+        // 而狀態列已經被別的訊息蓋掉（儲存、測試連線），就要重新講一次。
+        // 否則使用者會看到綠色的「已儲存」停在那裡，而實際上一筆都沒上傳。
         val err = uploader.lastError
-        if (err.isNotBlank() && err != lastSeenError) setStatus(Tone.ERR) { it.uploadError(err) }
+        if (err.isNotBlank() && (err != lastSeenError || statusTone != Tone.ERR)) {
+            setStatus(Tone.ERR) { it.uploadError(err) }
+        }
         lastSeenError = err
     }
 
@@ -548,8 +582,6 @@ class SettingsPanel(
         bytes >= 1024 -> "%,d KB".format(bytes / 1024)
         else -> "$bytes B"
     }
-
-    private fun startStatsTimer() = statsTimer.start()
 
     /**
      * 卸載時務必呼叫。Swing 的 Timer 掛在共用的 timer queue 上，不停掉的話即使分頁
@@ -656,6 +688,8 @@ class SettingsPanel(
         const val COLUMN_WIDTH = 900
         /** 視窗窄到放不下整欄時的最小左右留白。 */
         const val MIN_GUTTER = 20
+        /** 狀態磚的更新間隔。 */
+        const val STATS_REFRESH_MS = 5_000
 
         /** 狀態磚顯示本地時間即可；完整的 ISO 時間戳在 ES 文件裡。 */
         val TIME_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
