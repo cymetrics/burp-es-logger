@@ -284,7 +284,10 @@ class RecordWriter(
         val recordHash = Hashing.recordHash(material, prev)
         val integrity = JsonObject()
         integrity.addProperty("algo", "sha256")
-        integrity.addProperty("scheme", "record_sha256 = sha256(material || prev_hash)")
+        integrity.addProperty(
+            "scheme",
+            "record_sha256 = sha256(prev_hash || for each field: len(utf8) || ':' || field)"
+        )
         integrity.addProperty("prev_hash", prev)
         integrity.addProperty("record_sha256", recordHash)
         doc.add("integrity", integrity)

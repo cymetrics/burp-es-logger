@@ -14,13 +14,18 @@ import io.cymetrics.eslogger.upload.ElasticUploader
 
 class ExtensionMain : BurpExtension {
 
+    private companion object {
+        /** 卸載時願意花多久把待上傳資料送完；超過就放手，不要卡住 Burp 關閉。 */
+        const val UNLOAD_UPLOAD_BUDGET_MS = 15_000L
+    }
+
     override fun initialize(api: MontoyaApi) {
         api.extension().setName("ES Logger")
         val log = api.logging()
 
         val config = Config(api.persistence().preferences())
         val store: RecordSpool =
-            if (config.persistLocally) SqliteStore(config.dbPath) else MemorySpool()
+            if (config.persistLocally) SqliteStore(config.dbPath) else MemorySpool(config)
         val writer = RecordWriter(config, store, log)
         val uploader = ElasticUploader(config, store, log)
 
@@ -49,6 +54,15 @@ class ExtensionMain : BurpExtension {
         api.extension().registerUnloadingHandler {
             log.logToOutput("[es-logger] unloading — draining the queue and flushing pending records")
             writer.stop()
+            // 先盡量送出去再關閉：重載 extension 不該讓還沒上傳的紀錄消失
+            val stranded = uploader.drainBeforeExit(UNLOAD_UPLOAD_BUDGET_MS)
+            if (stranded > 0) {
+                log.logToError(
+                    "[es-logger] $stranded record(s) were still pending at unload" +
+                        if (config.persistLocally) " and remain in the local spool"
+                        else " and were lost — the gap is visible as a jump in seq"
+                )
+            }
             uploader.stop()
             store.close()
         }

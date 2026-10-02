@@ -52,6 +52,26 @@ class ElasticUploader(
         thread = Thread({ loop() }, "es-logger-uploader").apply { isDaemon = true; start() }
     }
 
+    /**
+     * 卸載 / 重載前的最後努力：在時限內把 spool 清空。
+     *
+     * 沒有這一步的話，純記憶體模式每次重載 extension 都會丟掉尚未上傳的紀錄 ——
+     * 開發時反覆重載尤其明顯。回傳仍未送出的筆數。
+     */
+    fun drainBeforeExit(timeoutMillis: Long): Long {
+        if (config.esEndpoint.isBlank() || config.esApiKey.isBlank()) return store.pendingCount
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (store.pendingCount > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                if (!flushOnce()) break
+            } catch (t: Throwable) {
+                logging.logToError("[es-logger] final upload attempt failed: ${t.message}")
+                break
+            }
+        }
+        return store.pendingCount
+    }
+
     fun stop() {
         running = false
         if (::thread.isInitialized) thread.interrupt()
@@ -127,7 +147,11 @@ class ElasticUploader(
             )
         }
 
-        val succeeded = parseBulkResult(resp.body(), batch)
+        val outcome = BulkResponse.parse(resp.body(), batch)
+        outcome.rejected.forEach { (row, reason) ->
+            logging.logToError("[es-logger] document ${row.docId} (seq ${row.seq}) rejected: $reason")
+        }
+        val succeeded = outcome.accepted
         if (succeeded.isNotEmpty()) {
             // 確認進了 ES 就把本地那幾列刪掉：本地只當 outbox，不留第二份。
             store.purge(succeeded.map { it.seq })
@@ -152,34 +176,6 @@ class ElasticUploader(
         const val MAX_BULK_BYTES = 8L * 1024 * 1024
         /** 每筆多出來的 action 行（index 名 + _id）概估。 */
         const val BULK_ACTION_OVERHEAD = 120L
-    }
-
-    /**
-     * 解析 _bulk 回應，回傳確認成功（201 建立 或 409 已存在）的那幾列。
-     *
-     * 回傳 [Pending] 而不是 doc_id：刪除走 seq（rowid）最直接，
-     * 不必再用 doc_id 繞一次二級索引。items 的順序和送出順序一致，以索引對位。
-     */
-    private fun parseBulkResult(body: String, batch: List<Pending>): List<Pending> {
-        val ok = ArrayList<Pending>(batch.size)
-        try {
-            val root = JsonParser.parseString(body).asJsonObject
-            val items = root.getAsJsonArray("items") ?: return batch // 沒 items 又是 2xx，保守當全成功
-            for ((i, item) in items.withIndex()) {
-                val row = batch.getOrNull(i) ?: continue
-                val create = item.asJsonObject.getAsJsonObject("create") ?: continue
-                val status = create.get("status")?.asInt ?: 0
-                if (status == 201 || status == 200 || status == 409) {
-                    ok.add(row)
-                } else {
-                    val err = create.get("error")?.toString()?.take(200) ?: "status=$status"
-                    logging.logToError("[es-logger] document ${row.docId} (seq ${row.seq}) rejected: $err")
-                }
-            }
-        } catch (t: Throwable) {
-            logging.logToError("[es-logger] could not parse the _bulk response: ${t.message}")
-        }
-        return ok
     }
 
     /** 測試連線的結果。文案留給 UI 處理，這裡只回報狀態與語言無關的細節。 */

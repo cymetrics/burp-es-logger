@@ -24,6 +24,17 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
 
     implementation(kotlin("stdlib"))
+
+    // 測試需要 Montoya 在 classpath 上（主程式是 compileOnly，不會傳遞到 test）
+    testImplementation(kotlin("test"))
+    testImplementation("net.portswigger.burp.extensions:montoya-api:$montoyaVersion")
+}
+
+tasks.test {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "failed", "skipped")
+    }
 }
 
 kotlin {
@@ -31,7 +42,10 @@ kotlin {
 }
 
 tasks.shadowJar {
-    archiveClassifier.set("") // 輸出 burp-es-logger-0.1.0.jar
+    // 檔名不帶版本號：Burp 裡 extension 的路徑是固定的，帶版本的話每次改版都要重新
+    // Add 一次，Auto-reload 也會指到舊檔。版本資訊由 git tag 與 release 負責。
+    archiveClassifier.set("")
+    archiveVersion.set("")    // 輸出 burp-es-logger.jar
     // Burp 每個 extension 有獨立 classloader，通常不需要 relocation。
     // 若和其他 extension 衝突，再開啟下面這行：
     // relocate("com.google.gson", "io.cymetrics.eslogger.shaded.gson")

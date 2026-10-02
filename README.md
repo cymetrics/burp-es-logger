@@ -56,7 +56,7 @@ Requires JDK 17. The Gradle wrapper is included.
 
 ```bash
 JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew shadowJar
-# → build/libs/burp-es-logger-0.1.0.jar
+# → build/libs/burp-es-logger.jar
 ```
 
 The jar bundles native SQLite binaries for macOS, Windows and Linux (including musl), so the same
@@ -64,12 +64,12 @@ artifact works everywhere Burp runs.
 
 ## Install
 
-Download the latest `burp-es-logger-<version>.jar` from
+Download the latest `burp-es-logger.jar` from
 [Releases](https://github.com/cymetrics/burp-es-logger/releases), or build it yourself (below).
 Each release ships a `.sha256` next to the jar — verify it before loading anything into Burp:
 
 ```bash
-shasum -a 256 -c burp-es-logger-<version>.jar.sha256
+shasum -a 256 -c burp-es-logger.jar.sha256
 ```
 
 Burp → Extensions → Add → Extension type **Java** → select the jar. An **ES Logger** tab appears.
@@ -126,20 +126,26 @@ Then fill in the tab: endpoint, API key, index prefix, tester ID, project ID →
 
 ## Verifying the chain
 
-Sort by `seq` and recompute, with `⟨US⟩` = 0x1F:
+Sort by `seq` and recompute. Each field is prefixed with its own length in UTF-8 bytes, so no
+field content can forge a boundary between fields:
 
 ```
-material = seq ⟨US⟩ doc_id ⟨US⟩ type ⟨US⟩ request.time ⟨US⟩ response.time ⟨US⟩
-           tool ⟨US⟩ method ⟨US⟩ url ⟨US⟩ status ⟨US⟩
-           request.raw_sha256 ⟨US⟩ request.body_sha256 ⟨US⟩
-           response.raw_sha256 ⟨US⟩ response.body_sha256
+fields = [ seq, doc_id, type, request.time, response.time,
+           tool, method, url, status,
+           request.raw_sha256, request.body_sha256,
+           response.raw_sha256, response.body_sha256 ]
 
-record_sha256 = SHA256( material ⟨US⟩ prev_hash )
+material = prev_hash  ‖  for each field:  len(field in UTF-8 bytes) ‖ ":" ‖ field
+
+record_sha256 = SHA256(material)
 ```
 
-The first record's `prev_hash` is 64 zeros. Absent fields are empty strings — which is also what
-fast mode produces for skipped hashes. WebSocket records use a slightly different field order; see
-`RecordWriter.kt`.
+The first record's `prev_hash` is 64 zeros, and `prev_hash` leads the material because its length is
+fixed at 64 hex characters. Absent fields are empty strings — which is also what fast mode produces
+for skipped hashes. WebSocket records use a slightly different field list; see `RecordWriter.kt`.
+
+Every document also carries this formula in `integrity.scheme`, so a single document is enough to
+know how to verify it.
 
 A gap in `seq` means records never reached Elasticsearch. A record whose hash does not match means
 the stored document was altered.

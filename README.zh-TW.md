@@ -49,7 +49,7 @@ Elasticsearch 一確認就刪除。Burp 關閉或積壓超過上限時，未送�
 
 ```bash
 JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew shadowJar
-# → build/libs/burp-es-logger-0.1.0.jar
+# → build/libs/burp-es-logger.jar
 ```
 
 jar 內含 macOS、Windows、Linux（含 musl）的 SQLite 原生函式庫，同一個檔案在各平台都能用。
@@ -57,11 +57,11 @@ jar 內含 macOS、Windows、Linux（含 musl）的 SQLite 原生函式庫，同
 ## 安裝
 
 到 [Releases](https://github.com/cymetrics/burp-es-logger/releases) 下載最新的
-`burp-es-logger-<版本>.jar`，或自行編譯（見下一節）。每個 release 的 jar 旁邊都附
+`burp-es-logger.jar`，或自行編譯（見下一節）。每個 release 的 jar 旁邊都附
 `.sha256`，載入 Burp 之前請先驗證：
 
 ```bash
-shasum -a 256 -c burp-es-logger-<版本>.jar.sha256
+shasum -a 256 -c burp-es-logger.jar.sha256
 ```
 
 Burp → Extensions → Add → Extension type 選 **Java** → 選那個 jar，會多出 **ES Logger** 分頁。
@@ -117,19 +117,25 @@ Kibana 的 Dev Tools。
 
 ## 驗證 hash chain
 
-依 `seq` 排序後逐筆重算，`⟨US⟩` 為 0x1F：
+依 `seq` 排序後逐筆重算。每個欄位前置它自己的 UTF-8 位元組長度，
+因此任何欄位內容都無法偽造欄位邊界：
 
 ```
-material = seq ⟨US⟩ doc_id ⟨US⟩ type ⟨US⟩ request.time ⟨US⟩ response.time ⟨US⟩
-           tool ⟨US⟩ method ⟨US⟩ url ⟨US⟩ status ⟨US⟩
-           request.raw_sha256 ⟨US⟩ request.body_sha256 ⟨US⟩
-           response.raw_sha256 ⟨US⟩ response.body_sha256
+fields = [ seq, doc_id, type, request.time, response.time,
+           tool, method, url, status,
+           request.raw_sha256, request.body_sha256,
+           response.raw_sha256, response.body_sha256 ]
 
-record_sha256 = SHA256( material ⟨US⟩ prev_hash )
+material = prev_hash  ‖  對每個欄位：len(UTF-8 位元組) ‖ ":" ‖ 欄位內容
+
+record_sha256 = SHA256(material)
 ```
 
-第一筆的 `prev_hash` 是 64 個 0。缺少的欄位以空字串參與計算 —— 極速模式跳過的雜湊也是如此。
+第一筆的 `prev_hash` 是 64 個 0；`prev_hash` 放在最前面是因為它固定 64 個十六進位字元，
+不會與後面的長度前綴混淆。缺少的欄位以空字串參與計算 —— 極速模式跳過的雜湊也是如此。
 WebSocket 紀錄的欄位組合略有不同，詳見 `RecordWriter.kt`。
+
+每份文件的 `integrity.scheme` 也記錄了這個公式，單看一份文件就知道該怎麼驗證。
 
 `seq` 出現缺口代表那幾筆從未送達 Elasticsearch；雜湊對不上則代表文件被改過。
 

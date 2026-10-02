@@ -26,6 +26,18 @@ data class Pending(
  */
 enum class SpoolKind { MEMORY, DISK }
 
+/**
+ * hash chain 鏈尾的保存處。
+ *
+ * 純記憶體模式沒有資料庫可以記「上一筆是誰」，但鏈尾只有兩個短字串 —— 放進 Burp 自己的
+ * 偏好設定即可，不必為此寫檔。沒有它的話，每次重載 extension 都會從 seq 1 重新開始，
+ * 同一個 index 裡就會出現重複的 seq，驗證時無法分辨順序。
+ */
+interface ChainTipStore {
+    fun loadChainTip(): Pair<Long, String>
+    fun saveChainTip(seq: Long, hash: String)
+}
+
 interface RecordSpool {
 
     /** hash chain 的鏈尾，writer 啟動時從這裡接續。 */

@@ -1,6 +1,8 @@
 package io.cymetrics.eslogger.config
 
 import burp.api.montoya.persistence.Preferences
+import io.cymetrics.eslogger.integrity.Hashing
+import io.cymetrics.eslogger.storage.ChainTipStore
 
 /**
  * 所有設定值。讀寫都透過 Burp 的 Preferences（跨重啟保存）。
@@ -8,7 +10,7 @@ import burp.api.montoya.persistence.Preferences
  * 注意：API key 會以明文存在 Burp 的使用者偏好設定中。測試機請做磁碟加密，
  * 案件結束後清除。
  */
-class Config(private val prefs: Preferences) {
+class Config(private val prefs: Preferences) : ChainTipStore {
 
     // --- Elasticsearch ---
     @Volatile var esEndpoint: String = get("es.endpoint", "")              // 例如 https://xxx.es.region.aws.elastic.cloud
@@ -53,6 +55,18 @@ class Config(private val prefs: Preferences) {
     // 打開才會寫 SQLite，積壓多少留多少。切換後需重載 extension 才生效。
     @Volatile var persistLocally: Boolean = getBool("storage.persistLocal", false)
     @Volatile var dbPath: String = get("storage.dbPath", defaultDbPath())
+
+    /**
+     * 鏈尾跟著 Burp 偏好設定走，所以純記憶體模式重載後 seq 仍會接續，
+     * 不會在同一個 index 裡產生重複的 seq。
+     */
+    override fun loadChainTip(): Pair<Long, String> =
+        (get("chain.seq", "0").toLongOrNull() ?: 0L) to get("chain.hash", Hashing.GENESIS)
+
+    override fun saveChainTip(seq: Long, hash: String) {
+        set("chain.seq", seq.toString())
+        set("chain.hash", hash)
+    }
 
     fun indexName(): String {
         val p = projectId.ifBlank { "default" }

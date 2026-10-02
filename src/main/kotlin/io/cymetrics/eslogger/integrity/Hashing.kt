@@ -31,12 +31,21 @@ object Hashing {
 
     /**
      * 把一筆記錄的關鍵欄位組成 canonical 字串，再和前一筆 hash 串成鏈。
-     * 用 0x1f (Unit Separator) 當分隔字元，避免欄位內容撞到分隔符。
-     * record_sha256 = SHA256( material || US || prevHash )
+     *
+     *     record_sha256 = SHA256( prev_hash ‖ for each field: len(utf8 bytes) ‖ ":" ‖ field )
+     *
+     * 每個欄位前置它自己的長度，而不是用分隔字元串起來。分隔字元的做法有歧義：
+     * 欄位內容只要含有那個字元，就能偽造欄位邊界，讓兩筆不同的紀錄算出同一個雜湊
+     * （["a","b"] 與 ["a\u001fb"] 會相同）。URL 是受測方與測試者都能影響的欄位，
+     * 這種歧義在稽核用途下不能留。長度前綴則讓每一種欄位組合只有唯一一種表示法。
+     *
+     * prev_hash 放在最前面：它固定是 64 個十六進位字元，不會和後面的長度前綴混淆。
      */
     fun recordHash(fields: List<String>, prevHash: String): String {
-        val sep = '\u001f'
-        val material = fields.joinToString(sep.toString()) + sep + prevHash
-        return sha256Hex(material)
+        val material = StringBuilder(prevHash)
+        for (field in fields) {
+            material.append(field.toByteArray(Charsets.UTF_8).size).append(':').append(field)
+        }
+        return sha256Hex(material.toString())
     }
 }

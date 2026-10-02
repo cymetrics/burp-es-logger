@@ -11,6 +11,7 @@ import java.awt.Component
 import java.awt.Container
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Graphics
 import java.awt.Font
 import java.awt.LayoutManager
 import java.awt.Rectangle
@@ -73,8 +74,8 @@ class SettingsPanel(
     // ---------- 衍生說明 / 狀態 ----------
     private val lblIndexPreview = muted("")
     private val lblBodyHint = muted("")
-    private val lblStatus = WrapText(baseFont, UIManager.getColor("Label.foreground") ?: Color.DARK_GRAY)
-    private val dot = JLabel("●")
+    private val lblStatus = WrapText({ baseFont }, { labelFg })
+    private val dot = ThemedLabel("●", { baseFont }, { toneColor(statusTone) })
 
     private val statUploaded = StatTile()
     private val statPending = StatTile()
@@ -93,7 +94,15 @@ class SettingsPanel(
     private lateinit var footerPanel: JPanel
     private lateinit var scroll: JScrollPane
 
+    /** 內容區用基準底色，標題列與狀態列才有東西可以浮出來。 */
+    override fun paintComponent(g: Graphics) {
+        g.color = surfaceBg
+        g.fillRect(0, 0, width, height)
+        super.paintComponent(g)
+    }
+
     init {
+        isOpaque = false
         langBox.selectedItem = Lang.from(config.uiLang)
         langBox.addActionListener {
             val chosen = langBox.selectedItem as? Lang ?: return@addActionListener
@@ -178,14 +187,19 @@ class SettingsPanel(
 
         val lang = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
             isOpaque = false
-            add(JLabel(s.langLabel).apply {
-                foreground = mutedFg
-                font = baseFont.deriveFont(baseFont.size2D - 1f)
-            })
+            add(ThemedLabel(s.langLabel, { baseFont.deriveFont(baseFont.size2D - 1f) }, { mutedFg }))
             add(langBox)
         }
 
-        return JPanel(BorderLayout()).apply {
+        return object : JPanel(BorderLayout()) {
+            // 自己畫而不是設 background：Burp 的 applyThemeToComponent 會覆寫 background，
+            // 而且每次重繪都重新取色，使用者切換佈景時會跟著走。
+            override fun paintComponent(g: Graphics) {
+                g.color = chromeBg
+                g.fillRect(0, 0, width, height)
+                super.paintComponent(g)
+            }
+        }.apply {
             isOpaque = false
             // 放 CENTER 而不是 WEST：WEST 只給元件自己的 preferred width，副標題就不會折行。
             add(text, BorderLayout.CENTER)
@@ -224,6 +238,11 @@ class SettingsPanel(
             span(cbPersist)
             checkboxNote(muted(s.persistLocalHint))
         }
+
+        // 四個區塊共用一條標籤欄，欄位左緣才會對齊成一直線
+        val forms = listOf(conn, ident, capture, upload)
+        val sharedLabelWidth = { forms.maxOf { it.intrinsicLabelWidth() } }
+        forms.forEach { it.labelWidthProvider = sharedLabelWidth }
 
         contentPanel = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -345,11 +364,13 @@ class SettingsPanel(
             isOpaque = false
             add(head)
             add(Box.createVerticalStrut(10))
-            add(JSeparator().apply {
-                alignmentX = Component.LEFT_ALIGNMENT
-                foreground = separatorFg
-                background = separatorFg
-            })
+            add(object : JSeparator() {
+                override fun paintComponent(g: Graphics) {
+                    foreground = separatorFg
+                    background = separatorFg
+                    super.paintComponent(g)
+                }
+            }.apply { alignmentX = Component.LEFT_ALIGNMENT })
         }
 
         val panel = object : JPanel(BorderLayout(0, 18)) {
@@ -359,7 +380,7 @@ class SettingsPanel(
         return panel.apply {
             isOpaque = false
             alignmentX = Component.LEFT_ALIGNMENT
-            border = BorderFactory.createEmptyBorder(0, 0, if (last) 0 else 44, 0)
+            border = BorderFactory.createEmptyBorder(0, 0, if (last) 0 else 36, 0)
             add(headBox, BorderLayout.NORTH)
             add(body, BorderLayout.CENTER)
         }
@@ -377,7 +398,7 @@ class SettingsPanel(
         JPanel(FlowLayout(FlowLayout.LEFT, 7, 0)).apply {
             isOpaque = false
             add(field)
-            add(JLabel(unit).apply { foreground = mutedFg; font = baseFont.deriveFont(baseFont.size2D - 1f) })
+            add(ThemedLabel(unit, { baseFont.deriveFont(baseFont.size2D - 1f) }, { mutedFg }))
         }
 
     private inner class StatTile : JPanel() {
@@ -385,11 +406,8 @@ class SettingsPanel(
             font = baseFont.deriveFont(Font.BOLD, baseFont.size2D + 4f)
             alignmentX = Component.LEFT_ALIGNMENT
         }
-        private val captionLabel = JLabel().apply {
-            foreground = captionFg
-            font = baseFont.deriveFont(baseFont.size2D - 1f)
-            alignmentX = Component.LEFT_ALIGNMENT
-        }
+        private val captionLabel = ThemedLabel("", { baseFont.deriveFont(baseFont.size2D - 1f) }, { captionFg })
+            .apply { alignmentX = Component.LEFT_ALIGNMENT }
 
         var caption: String
             get() = captionLabel.text
@@ -531,12 +549,7 @@ class SettingsPanel(
         val rendered = statusText(s)
         lblStatus.text = rendered
         lblStatus.toolTipText = rendered
-        dot.foreground = when (statusTone) {
-            Tone.IDLE -> mutedFg
-            Tone.OK -> OK_FG
-            Tone.WARN -> WARN_FG
-            Tone.ERR -> ERR_FG
-        }
+        dot.repaint()   // 顏色在 paint 時才取，佈景換掉也會跟著變
         revalidate()
     }
 
@@ -574,8 +587,39 @@ class SettingsPanel(
     /** 分隔線：只要能界定範圍即可，不該和文字搶注意力。 */
     private val separatorFg: Color get() = fade(0.84)
 
+    /**
+     * 標題列與狀態列的底色：由背景往文字色推一點點。
+     *
+     * 不寫死灰色，否則深色佈景會變成「比背景更黑」的一塊。往文字色推的方向在淺色
+     * 佈景是變深、深色佈景是變淺，兩邊都會自然地浮出一層。
+     */
+    /** 背景夠暗就視為深色佈景；用亮度判斷，不去猜佈景名稱。 */
+    private fun isDarkTheme(): Boolean {
+        val bg = surfaceBg
+        return (0.2126 * bg.red + 0.7152 * bg.green + 0.0722 * bg.blue) < 128
+    }
+
+    /** 語意色依佈景取：固定一組色在其中一邊一定會對比不足。 */
+    private fun toneColor(tone: Tone): Color {
+        val dark = isDarkTheme()
+        return when (tone) {
+            Tone.IDLE -> mutedFg
+            Tone.OK -> if (dark) OK_DARK else OK_LIGHT
+            Tone.WARN -> if (dark) WARN_DARK else WARN_LIGHT
+            Tone.ERR -> if (dark) ERR_DARK else ERR_LIGHT
+        }
+    }
+
+    private val chromeBg: Color
+        get() {
+            val bg = surfaceBg
+            val fg = labelFg
+            fun mix(a: Int, b: Int) = (a * 0.94 + b * 0.06).toInt().coerceIn(0, 255)
+            return Color(mix(bg.red, fg.red), mix(bg.green, fg.green), mix(bg.blue, fg.blue))
+        }
+
     private fun muted(text: String): WrapText =
-        WrapText(baseFont.deriveFont(baseFont.size2D - 1f), mutedFg).apply { this.text = text }
+        WrapText({ baseFont.deriveFont(baseFont.size2D - 1f) }, { mutedFg }).apply { this.text = text }
 
     private companion object {
         /** 內容欄寬度上限；超過這個寬度輸入框會拉長到難以閱讀，所以改成置中留白。 */
@@ -586,10 +630,15 @@ class SettingsPanel(
         /** 狀態磚顯示本地時間即可；完整的 ISO 時間戳在 ES 文件裡。 */
         val TIME_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
 
-        // 語意色：淺色與深色佈景都有足夠對比的中間調。
-        val OK_FG = Color(0x2F, 0xA3, 0x6B)
-        val WARN_FG = Color(0xD0, 0x8B, 0x1E)
-        val ERR_FG = Color(0xD4, 0x51, 0x3F)
+        // 語意色分深淺兩套。單一組中間調在其中一個佈景一定會不夠對比：
+        // 量過的結果，原本的綠在淺色底只有 2.85:1、原本的紅在深色底只有 2.55:1，
+        // 都低於 WCAG 1.4.11 對非文字元件要求的 3:1。以下每個都 ≥ 3.8:1。
+        val OK_LIGHT = Color(0x15, 0x7F, 0x4C)    // 4.50:1 on #F2F2F2
+        val WARN_LIGHT = Color(0x9A, 0x64, 0x00)  // 4.47:1
+        val ERR_LIGHT = Color(0xB3, 0x37, 0x2A)   // 5.36:1
+        val OK_DARK = Color(0x4F, 0xC8, 0x8A)     // 5.03:1 on #3C3F41
+        val WARN_DARK = Color(0xE8, 0xB0, 0x4B)   // 5.43:1
+        val ERR_DARK = Color(0xF0, 0x77, 0x6A)    // 3.82:1
     }
 }
 
@@ -601,7 +650,10 @@ class SettingsPanel(
  * JLabel 不折行，窄視窗時只會被切成 "…"；這裡用設成不可編輯、透明的 JTextArea，
  * 外觀和標籤一致但高度會隨寬度長出來。
  */
-private class WrapText(font: Font, fg: Color) : JTextArea() {
+private class WrapText(
+    private val fontSupplier: () -> Font,
+    private val colorSupplier: () -> Color
+) : JTextArea() {
     init {
         isEditable = false
         isFocusable = false
@@ -610,8 +662,27 @@ private class WrapText(font: Font, fg: Color) : JTextArea() {
         wrapStyleWord = true
         border = null
         highlighter = null
-        this.font = font
-        foreground = fg
+    }
+
+    // 建構時取色只在「當下」正確。使用者在 Burp 切換深淺佈景後，這些元件不會重建，
+    // 顏色就會留在舊佈景；改成每次重繪時才解析。
+    override fun paintComponent(g: Graphics) {
+        font = fontSupplier()
+        foreground = colorSupplier()
+        super.paintComponent(g)
+    }
+}
+
+/** 同理的 JLabel：說明文字、單位、狀態磚標題、狀態燈號都用它。 */
+private class ThemedLabel(
+    text: String,
+    private val fontSupplier: () -> Font,
+    private val colorSupplier: () -> Color
+) : JLabel(text) {
+    override fun paintComponent(g: Graphics) {
+        font = fontSupplier()
+        foreground = colorSupplier()
+        super.paintComponent(g)
     }
 }
 
@@ -695,6 +766,16 @@ private class ResponsiveForm(
 
     private val rows = ArrayList<FormRow>()
 
+    /**
+     * 標籤欄寬度的來源。預設各自為政，但同一個面板裡的多個表單應該共用一條對齊線 ——
+     * 否則每個區塊的欄位左緣都不一樣，整頁看起來就是歪的。
+     */
+    var labelWidthProvider: (() -> Int)? = null
+
+    /** 這個表單自己需要的標籤欄寬。 */
+    fun intrinsicLabelWidth(): Int =
+        rows.filterIsInstance<FormRow.Labeled>().maxOfOrNull { it.label.preferredSize.width } ?: 0
+
     init { isOpaque = false }
 
     fun row(label: String, field: JComponent, hint: String? = null, stretch: Boolean = true) {
@@ -736,8 +817,7 @@ private class ResponsiveForm(
         val ins = insets
         val avail = (totalWidth - ins.left - ins.right).coerceAtLeast(MIN_FIELD)
 
-        val labelCol = rows.filterIsInstance<FormRow.Labeled>()
-            .maxOfOrNull { it.label.preferredSize.width } ?: 0
+        val labelCol = labelWidthProvider?.invoke() ?: intrinsicLabelWidth()
         val twoColumn = avail >= TWO_COLUMN_MIN && labelCol + HGAP + MIN_FIELD <= avail
         val indent = if (twoColumn) labelCol + HGAP else 0
         val fieldW = avail - indent

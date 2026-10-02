@@ -95,14 +95,15 @@ curl -s -X PUT "$ES/burp-log-<project_id>/_mapping" \
 依 `seq` 排序後，逐筆用下列公式重算並比對即可證明沒有被刪改：
 
 ```
-material = seq ⟨US⟩ doc_id ⟨US⟩ type ⟨US⟩ request.time ⟨US⟩ response.time ⟨US⟩
-           tool ⟨US⟩ method ⟨US⟩ url ⟨US⟩ status ⟨US⟩
-           request.raw_sha256 ⟨US⟩ request.body_sha256 ⟨US⟩
-           response.raw_sha256 ⟨US⟩ response.body_sha256
-record_sha256 = SHA256( material ⟨US⟩ prev_hash )
+fields = [ seq, doc_id, type, request.time, response.time,
+           tool, method, url, status,
+           request.raw_sha256, request.body_sha256,
+           response.raw_sha256, response.body_sha256 ]
+material = prev_hash ‖ 對每個欄位：len(UTF-8 位元組) ‖ ":" ‖ 欄位內容
+record_sha256 = SHA256(material)
 ```
 
-`⟨US⟩` = 0x1F（Unit Separator）。第一筆的 `prev_hash` 為 64 個 0。
+第一筆的 `prev_hash` 為 64 個 0。長度前綴確保欄位邊界無法被內容偽造。
 （WebSocket 記錄的 material 欄位組合略有不同，詳見 RecordWriter.kt。）
 鏈的驗證在 ES 端做：依 `seq` 排序後逐筆重算，`seq` 不連續就代表有缺漏。
 本地 SQLite 只是 outbox（上傳成功即刪），不保留副本。
