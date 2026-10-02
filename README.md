@@ -1,0 +1,159 @@
+# ES Logger
+
+A Burp Suite extension that records every HTTP and WebSocket message Burp handles
+into Elasticsearch, with a SHA-256 hash chain that makes deletion or tampering detectable.
+
+Built for authorized penetration testing, where "what did the tester actually send, and when"
+has to be answerable months later — by someone who was not in the room.
+
+> 中文說明請見 [README.zh-TW.md](README.zh-TW.md)
+
+## What it does
+
+- **Captures everything Burp sends.** Hooks `api.http()`, so Proxy, Repeater, Intruder, Scanner
+  and other extensions are all covered — not just proxied browser traffic.
+- **Pairs requests with responses** by `messageId`. A request that never gets a response is still
+  written as `request_only` once it times out, so nothing silently disappears.
+- **Hash-chains every record.** Each document carries `raw_sha256` and `body_sha256`, plus
+  `record_sha256 = SHA256(material ‖ prev_hash)`. Deleting, inserting or editing a record in the
+  middle of a run breaks the chain.
+- **Never duplicates.** `_bulk` uses `create` with a client-generated `_id`, so a resend after a
+  network failure returns 409 and is treated as already stored.
+- **Stays out of your way.** The capture callback only grabs bytes and hands them to a background
+  thread. Uploads use a plain JDK `HttpClient` that does not go through Burp, so the extension
+  never logs its own traffic and the API key never lands in the proxy history.
+
+## Design trade-offs
+
+These are deliberate. Read them before deploying this on an engagement.
+
+**The local spool is not an archive.** By default nothing is written to disk: pending records live
+in a 32 MB in-memory queue and are deleted the moment Elasticsearch confirms them. If Burp exits
+or the backlog overflows, unsent records are lost — and because `seq` keeps counting, the gap is
+visible rather than silent. Enable *Spool pending records to SQLite* if you would rather trade disk
+for completeness.
+
+**Elasticsearch is the only source of truth.** A hash chain proves that what you have was not
+altered. It does not prove that nothing is missing. Combine it with an append-only API key
+(see [`elasticsearch/setup.md`](elasticsearch/setup.md)) so a compromised testing machine cannot
+rewrite history.
+
+**Fast mode skips hashing for excluded static assets.** Images, fonts and CSS are the client's own
+content; hashing a few MB of PNG twice per request buys little evidence and costs real time. Those
+messages are marked `hashes_skipped: true` — the URL, status and timing still enter the chain.
+Turn it off if you need byte-level proof of every response.
+
+**Bodies are filtered, but their fingerprints are not.** Excluded or truncated bodies still record
+`body_len` and (unless fast mode applies) `body_sha256`, which is enough to prove a specific
+payload passed through without storing it.
+
+## Build
+
+Requires JDK 17. The Gradle wrapper is included.
+
+```bash
+JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew shadowJar
+# → build/libs/burp-es-logger-0.1.0.jar
+```
+
+The jar bundles native SQLite binaries for macOS, Windows and Linux (including musl), so the same
+artifact works everywhere Burp runs.
+
+## Install
+
+Burp → Extensions → Add → Extension type **Java** → select the jar. An **ES Logger** tab appears.
+
+Enable **Auto-reload** on the extension if you plan to rebuild it — Burp then picks up a new jar on
+its own.
+
+## Set up Elasticsearch
+
+Follow [`elasticsearch/setup.md`](elasticsearch/setup.md): it creates the index template and an
+append-only API key that can create documents but cannot read, overwrite or delete them.
+[`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) is the same thing ready to paste into
+Kibana's Dev Tools console.
+
+Then fill in the tab: endpoint, API key, index prefix, tester ID, project ID → **Save settings** →
+**Test connection**.
+
+## Settings
+
+| Setting | Default | Notes |
+|---|---|---|
+| Elasticsearch endpoint | — | Full URL, no trailing slash |
+| API key (encoded) | — | Needs only `create_doc` on `burp-log-*` |
+| Index prefix | `burp-log` | Actual index is `<prefix>-<project id>` |
+| Tester / Project ID | — | Recorded on every document; project ID also names the index |
+| Skip bodies for extensions | `js,gif,jpg,jpeg,png,ico,css,woff,woff2,ttf,svg` | Matched on both extension and Content-Type |
+| Max body size | 2 MB | Larger bodies keep a truncated slice plus the full length and hash |
+| Response timeout | 120 s | After this a request is written as `request_only` |
+| Store bodies | on | Off keeps hashes only |
+| Record WebSocket messages | on | |
+| Fast mode | **on** | Skip hashing for excluded static assets |
+| Upload interval | 15 s | Idle polling only; a backlog is sent back-to-back |
+| Batch size | 500 | Also capped at 8 MB per `_bulk` request |
+| Upload automatically | on | |
+| Spool to SQLite | **off** | On = survive restarts at the cost of disk |
+
+## Document shape
+
+```jsonc
+{
+  "@timestamp": "2026-10-02T07:49:05.323Z",
+  "seq": 1234, "doc_id": "uuid", "session_id": "uuid",
+  "tester_id": "zet", "project_id": "acme2026", "capture_host": "laptop",
+  "type": "http", "tool": "Proxy",
+  "request":  { "time", "method", "url", "host", "port", "secure", "headers",
+                "body" | "body_b64", "body_stored", "body_len", "body_sha256",
+                "body_truncated", "body_skip_reason", "raw_sha256", "hashes_skipped" },
+  "response": { "time", "status", "headers", "body" | "body_b64", "...": "same as request" },
+  "integrity": { "algo": "sha256", "scheme": "...", "prev_hash": "...", "record_sha256": "..." }
+}
+```
+
+`type` is one of `http`, `http_request_only`, `http_response_only`, `websocket`.
+
+## Verifying the chain
+
+Sort by `seq` and recompute, with `⟨US⟩` = 0x1F:
+
+```
+material = seq ⟨US⟩ doc_id ⟨US⟩ type ⟨US⟩ request.time ⟨US⟩ response.time ⟨US⟩
+           tool ⟨US⟩ method ⟨US⟩ url ⟨US⟩ status ⟨US⟩
+           request.raw_sha256 ⟨US⟩ request.body_sha256 ⟨US⟩
+           response.raw_sha256 ⟨US⟩ response.body_sha256
+
+record_sha256 = SHA256( material ⟨US⟩ prev_hash )
+```
+
+The first record's `prev_hash` is 64 zeros. Absent fields are empty strings — which is also what
+fast mode produces for skipped hashes. WebSocket records use a slightly different field order; see
+`RecordWriter.kt`.
+
+A gap in `seq` means records never reached Elasticsearch. A record whose hash does not match means
+the stored document was altered.
+
+## Before you run this on a real engagement
+
+- These logs contain the target's **credentials, session tokens and personal data**, and they leave
+  your machine for a third-party cloud. Confirm the engagement contract and NDA allow it, and check
+  whether data residency is constrained.
+- Scanner and Intruder can produce hundreds of thousands of records in one run. Estimate volume and
+  cost first; consider turning bodies off or lowering the size limit for those tools.
+- The API key is stored in plaintext in Burp's user preferences. Protect the testing machine, and
+  revoke the key when the engagement closes.
+
+## Known limitations
+
+- The API key is not stored in an OS keychain.
+- Binary bodies grow about 33% as base64 in Elasticsearch; the size limit and truncation bound this.
+- A batch that Elasticsearch permanently rejects (a mapping conflict, say) is retried forever and
+  blocks everything behind it. There is no poison-batch quarantine yet.
+- Text bodies are decoded as UTF-8, so invalid bytes become U+FFFD and the stored text will not match
+  `body_sha256`. `raw_sha256` still covers the original bytes.
+- A hash chain detects tampering; it does not prevent it. Immutability comes from the append-only
+  API key, and from whatever external notarization you add on top.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

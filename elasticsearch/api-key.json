@@ -1,0 +1,17 @@
+{
+  "name": "burp-logger-writer",
+  "role_descriptors": {
+    "burp_logger_writer": {
+      "cluster": [],
+      "indices": [
+        {
+          "names": ["burp-log-*"],
+          "privileges": ["auto_configure", "create_doc"]
+        }
+      ]
+    }
+  },
+  "metadata": {
+    "purpose": "authorized pentest traffic logging (append-only)"
+  }
+}

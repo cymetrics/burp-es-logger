@@ -1,0 +1,21 @@
+# Gradle / build
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本機暫存（outbox）；不該出現在 repo 裡，內含受測流量
+*.db
+*.db-wal
+*.db-shm

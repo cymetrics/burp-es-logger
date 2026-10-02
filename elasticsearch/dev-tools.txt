@@ -1,0 +1,222 @@
+# Kibana → Dev Tools 貼這份就好（以你的登入身分執行，不需要 API key）
+# 兩段都選起來按右上角的執行箭頭，或各自把游標放進去按 Ctrl/Cmd + Enter
+
+# 1. 更新 index template（只影響「之後新建」的 index）
+PUT _index_template/burp-log
+{
+  "index_patterns": [
+    "burp-log-*"
+  ],
+  "priority": 200,
+  "template": {
+    "mappings": {
+      "dynamic": false,
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "seq": {
+          "type": "long"
+        },
+        "doc_id": {
+          "type": "keyword"
+        },
+        "session_id": {
+          "type": "keyword"
+        },
+        "tester_id": {
+          "type": "keyword"
+        },
+        "project_id": {
+          "type": "keyword"
+        },
+        "capture_host": {
+          "type": "keyword"
+        },
+        "type": {
+          "type": "keyword"
+        },
+        "tool": {
+          "type": "keyword"
+        },
+        "request": {
+          "properties": {
+            "time": {
+              "type": "date"
+            },
+            "method": {
+              "type": "keyword"
+            },
+            "url": {
+              "type": "wildcard"
+            },
+            "host": {
+              "type": "keyword"
+            },
+            "port": {
+              "type": "integer"
+            },
+            "secure": {
+              "type": "boolean"
+            },
+            "headers": {
+              "type": "match_only_text"
+            },
+            "body": {
+              "type": "match_only_text"
+            },
+            "body_b64": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "body_encoding": {
+              "type": "keyword"
+            },
+            "body_stored": {
+              "type": "boolean"
+            },
+            "body_truncated": {
+              "type": "boolean"
+            },
+            "body_len": {
+              "type": "long"
+            },
+            "body_sha256": {
+              "type": "keyword"
+            },
+            "body_skip_reason": {
+              "type": "keyword"
+            },
+            "raw_sha256": {
+              "type": "keyword"
+            },
+            "hashes_skipped": {
+              "type": "boolean"
+            }
+          }
+        },
+        "response": {
+          "properties": {
+            "time": {
+              "type": "date"
+            },
+            "status": {
+              "type": "integer"
+            },
+            "headers": {
+              "type": "match_only_text"
+            },
+            "body": {
+              "type": "match_only_text"
+            },
+            "body_b64": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "body_encoding": {
+              "type": "keyword"
+            },
+            "body_stored": {
+              "type": "boolean"
+            },
+            "body_truncated": {
+              "type": "boolean"
+            },
+            "body_len": {
+              "type": "long"
+            },
+            "body_sha256": {
+              "type": "keyword"
+            },
+            "body_skip_reason": {
+              "type": "keyword"
+            },
+            "raw_sha256": {
+              "type": "keyword"
+            },
+            "hashes_skipped": {
+              "type": "boolean"
+            }
+          }
+        },
+        "websocket": {
+          "properties": {
+            "url": {
+              "type": "wildcard"
+            },
+            "direction": {
+              "type": "keyword"
+            },
+            "is_text": {
+              "type": "boolean"
+            },
+            "body": {
+              "type": "match_only_text"
+            },
+            "body_b64": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "body_encoding": {
+              "type": "keyword"
+            },
+            "body_stored": {
+              "type": "boolean"
+            },
+            "body_truncated": {
+              "type": "boolean"
+            },
+            "body_len": {
+              "type": "long"
+            },
+            "body_sha256": {
+              "type": "keyword"
+            },
+            "hashes_skipped": {
+              "type": "boolean"
+            },
+            "body_skip_reason": {
+              "type": "keyword"
+            }
+          }
+        },
+        "integrity": {
+          "properties": {
+            "algo": {
+              "type": "keyword",
+              "index": false
+            },
+            "scheme": {
+              "type": "keyword",
+              "index": false
+            },
+            "prev_hash": {
+              "type": "keyword"
+            },
+            "record_sha256": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+# 2. 既有 index 補上新欄位（把 burp-log-<project_id> 換成你的 index 名稱）
+#    新增欄位允許；既有欄位的型別與 index 設定不能改
+PUT burp-log-<project_id>/_mapping
+{
+  "properties": {
+    "request":   { "properties": { "hashes_skipped": { "type": "boolean" } } },
+    "response":  { "properties": { "hashes_skipped": { "type": "boolean" } } },
+    "websocket": { "properties": { "hashes_skipped": { "type": "boolean" },
+                                    "body_skip_reason": { "type": "keyword" } } }
+  }
+}
+
+# 3. 確認（應該看得到 hashes_skipped）
+GET burp-log-<project_id>/_mapping/field/request.hashes_skipped

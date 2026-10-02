@@ -1,0 +1,202 @@
+{
+  "index_patterns": [
+    "burp-log-*"
+  ],
+  "priority": 200,
+  "template": {
+    "mappings": {
+      "dynamic": false,
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "seq": {
+          "type": "long"
+        },
+        "doc_id": {
+          "type": "keyword"
+        },
+        "session_id": {
+          "type": "keyword"
+        },
+        "tester_id": {
+          "type": "keyword"
+        },
+        "project_id": {
+          "type": "keyword"
+        },
+        "capture_host": {
+          "type": "keyword"
+        },
+        "type": {
+          "type": "keyword"
+        },
+        "tool": {
+          "type": "keyword"
+        },
+        "request": {
+          "properties": {
+            "time": {
+              "type": "date"
+            },
+            "method": {
+              "type": "keyword"
+            },
+            "url": {
+              "type": "wildcard"
+            },
+            "host": {
+              "type": "keyword"
+            },
+            "port": {
+              "type": "integer"
+            },
+            "secure": {
+              "type": "boolean"
+            },
+            "headers": {
+              "type": "match_only_text"
+            },
+            "body": {
+              "type": "match_only_text"
+            },
+            "body_b64": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "body_encoding": {
+              "type": "keyword"
+            },
+            "body_stored": {
+              "type": "boolean"
+            },
+            "body_truncated": {
+              "type": "boolean"
+            },
+            "body_len": {
+              "type": "long"
+            },
+            "body_sha256": {
+              "type": "keyword"
+            },
+            "body_skip_reason": {
+              "type": "keyword"
+            },
+            "raw_sha256": {
+              "type": "keyword"
+            },
+            "hashes_skipped": {
+              "type": "boolean"
+            }
+          }
+        },
+        "response": {
+          "properties": {
+            "time": {
+              "type": "date"
+            },
+            "status": {
+              "type": "integer"
+            },
+            "headers": {
+              "type": "match_only_text"
+            },
+            "body": {
+              "type": "match_only_text"
+            },
+            "body_b64": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "body_encoding": {
+              "type": "keyword"
+            },
+            "body_stored": {
+              "type": "boolean"
+            },
+            "body_truncated": {
+              "type": "boolean"
+            },
+            "body_len": {
+              "type": "long"
+            },
+            "body_sha256": {
+              "type": "keyword"
+            },
+            "body_skip_reason": {
+              "type": "keyword"
+            },
+            "raw_sha256": {
+              "type": "keyword"
+            },
+            "hashes_skipped": {
+              "type": "boolean"
+            }
+          }
+        },
+        "websocket": {
+          "properties": {
+            "url": {
+              "type": "wildcard"
+            },
+            "direction": {
+              "type": "keyword"
+            },
+            "is_text": {
+              "type": "boolean"
+            },
+            "body": {
+              "type": "match_only_text"
+            },
+            "body_b64": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "body_encoding": {
+              "type": "keyword"
+            },
+            "body_stored": {
+              "type": "boolean"
+            },
+            "body_truncated": {
+              "type": "boolean"
+            },
+            "body_len": {
+              "type": "long"
+            },
+            "body_sha256": {
+              "type": "keyword"
+            },
+            "hashes_skipped": {
+              "type": "boolean"
+            },
+            "body_skip_reason": {
+              "type": "keyword"
+            }
+          }
+        },
+        "integrity": {
+          "properties": {
+            "algo": {
+              "type": "keyword",
+              "index": false
+            },
+            "scheme": {
+              "type": "keyword",
+              "index": false
+            },
+            "prev_hash": {
+              "type": "keyword"
+            },
+            "record_sha256": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  }
+}
