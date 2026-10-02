@@ -57,6 +57,9 @@ class ElasticUploader(
     /** 整批被拒時暫時縮小的批次量，用來二分逼近出問題的那一筆；成功後歸零。 */
     @Volatile private var batchLimitOverride = 0
 
+    /** 連線中斷只通報 Event log 一次，恢復後才重設。 */
+    @Volatile private var outageReported = false
+
     fun start() {
         running = true
         thread = Thread({ loop() }, "es-logger-uploader").apply { isDaemon = true; start() }
@@ -96,6 +99,10 @@ class ElasticUploader(
                     continue
                 }
                 val uploadedAny = flushOnce()
+                if (outageReported) {
+                    outageReported = false
+                    logging.raiseInfoEvent("ES Logger: uploads have recovered")
+                }
                 backoff = 1000L
                 if (!uploadedAny) Thread.sleep(config.uploadIntervalSeconds * 1000L)
             } catch (ie: InterruptedException) {
@@ -103,8 +110,13 @@ class ElasticUploader(
             } catch (t: Throwable) {
                 lastError = t.message ?: t.toString()
                 logging.logToError("[es-logger] upload failed, retrying in ${backoff}ms: $lastError")
+                // 退避到頂代表已經失敗一分鐘以上，這時才驚動 Event log，而且只講一次
+                if (backoff >= MAX_BACKOFF_MS && !outageReported) {
+                    outageReported = true
+                    logging.raiseErrorEvent("ES Logger: uploads have been failing for over a minute — $lastError")
+                }
                 try { Thread.sleep(backoff) } catch (_: InterruptedException) { break }
-                backoff = (backoff * 2).coerceAtMost(60_000L)
+                backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
             }
         }
     }
@@ -215,6 +227,8 @@ class ElasticUploader(
         const val MAX_BULK_BYTES = 8L * 1024 * 1024
         /** 每筆多出來的 action 行（index 名 + _id）概估。 */
         const val BULK_ACTION_OVERHEAD = 120L
+        /** 退避上限；到頂就代表已經失敗超過一分鐘。 */
+        const val MAX_BACKOFF_MS = 60_000L
     }
 
     /**
@@ -234,6 +248,11 @@ class ElasticUploader(
             "[es-logger] GIVING UP on ${rows.size} record(s): seq ${seqs.joinToString()}. $reason\n" +
                 "[es-logger] These records are gone from the local spool and will never reach Elasticsearch. " +
                 "The resulting gap in seq is intentional and detectable during verification."
+        )
+        // 這會出現在 Dashboard 的 Event log —— 資料遺失不該只躺在 extension 自己的分頁裡
+        logging.raiseCriticalEvent(
+            "ES Logger: gave up on ${rows.size} record(s) (seq ${seqs.joinToString()}); " +
+                "they will be missing from the audit index"
         )
     }
 

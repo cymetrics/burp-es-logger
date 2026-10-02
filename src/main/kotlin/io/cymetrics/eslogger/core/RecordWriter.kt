@@ -54,6 +54,8 @@ class RecordWriter(
     @Volatile private var running = false
     private lateinit var thread: Thread
     private var lastSweep = 0L
+    private var lastDroppedSeen = 0L
+    private var lastDropReport = 0L
 
     fun submit(e: CaptureEvent) {
         val cost = e.sizeBytes().coerceIn(1, MAX_QUEUE_BYTES)
@@ -304,6 +306,29 @@ class RecordWriter(
         if (writeBuffer.isEmpty()) return
         store.insertAll(writeBuffer)
         writeBuffer.clear()
+        reportDroppedRecords()
+    }
+
+    /**
+     * 記憶體 outbox 滿了會丟掉最舊的紀錄。那是真正的資料遺失，所以要讓使用者看得到 ——
+     * 但積壓期間每批都會丟，所以限制通報頻率，否則 Event log 會被洗版。
+     */
+    private fun reportDroppedRecords() {
+        val dropped = store.droppedCount
+        if (dropped <= lastDroppedSeen) return
+        val now = System.currentTimeMillis()
+        if (now - lastDropReport < DROP_REPORT_INTERVAL_MS) return
+        val delta = dropped - lastDroppedSeen
+        lastDroppedSeen = dropped
+        lastDropReport = now
+        logging.logToError(
+            "[es-logger] dropped $delta record(s) because the in-memory spool is full " +
+                "($dropped total this session) — Elasticsearch is not keeping up, or is unreachable"
+        )
+        logging.raiseCriticalEvent(
+            "ES Logger: dropped $delta record(s), the in-memory spool is full " +
+                "($dropped total). Enable the SQLite spool to stop losing records."
+        )
     }
 
     private fun contentType(headText: String): String =
@@ -416,6 +441,8 @@ class RecordWriter(
         const val QUEUE_CAPACITY = 20_000
         /** 一個 SQLite 交易最多累積幾筆；佇列一排空就會提前 flush。 */
         const val MAX_WRITE_BATCH = 128
+        /** 丟棄通報的最短間隔，避免積壓時洗版 Event log。 */
+        const val DROP_REPORT_INTERVAL_MS = 30_000L
 
         /** 編譯一次就好：原本每一筆訊息都重新 new 一個 Regex。 */
         val CONTENT_TYPE_RE = Regex("(?im)^content-type:\\s*([^\\r\\n]+)")
