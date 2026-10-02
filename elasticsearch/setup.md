@@ -95,8 +95,10 @@ curl -s -X PUT "$ES/burp-log-<project_id>/_mapping" \
 依 `seq` 排序後，逐筆用下列公式重算並比對即可證明沒有被刪改：
 
 ```
-fields = [ seq, doc_id, type, request.time, response.time,
-           tool, method, url, status,
+fields = [ seq, doc_id, type,
+           session_id, tester_id, project_id, capture_host,
+           request.time, response.time,
+           tool, request.method, request.url, response.status,
            request.raw_sha256, request.body_sha256,
            response.raw_sha256, response.body_sha256 ]
 material = prev_hash ‖ 對每個欄位：len(UTF-8 位元組) ‖ ":" ‖ 欄位內容

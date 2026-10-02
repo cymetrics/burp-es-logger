@@ -32,6 +32,11 @@ class ElasticUploader(
 ) {
     private val http: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
+        // 明確停用 proxy。HttpClient 預設會查 JVM 全域的 ProxySelector，所以若 Burp 以
+        // -Dhttps.proxyHost 啟動（串接其他工具時很常見），帶著 API key 的 _bulk 會流經
+        // 那個 proxy —— 若那正是 Burp 自己，金鑰就進了 proxy history 與專案檔，
+        // 而且上傳流量會被這個擴充自己記錄下來，遞迴。
+        .proxy(HttpClient.Builder.NO_PROXY)
         .build()
 
     @Volatile private var running = false
@@ -44,18 +49,23 @@ class ElasticUploader(
     @Volatile var lastUploadCount: Int = 0
         private set
     /** 本 session 累計成功上傳的筆數。本地不留副本後，這是「總共記了多少」的來源。 */
-    @Volatile var uploadedTotal: Long = 0
-        private set
+    private val uploadedCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** UI 按鈕與 uploader thread 都會累加，所以用原子計數器。 */
+    val uploadedTotal: Long get() = uploadedCounter.get()
 
     /** 本 session 因為 ES 永久拒絕而放棄的筆數。這些 seq 會在 index 裡缺號。 */
-    @Volatile var rejectedTotal: Long = 0
-        private set
+    private val rejectedCounter = java.util.concurrent.atomic.AtomicLong(0)
+    val rejectedTotal: Long get() = rejectedCounter.get()
 
     /** 每筆被拒絕的次數。uploader thread 與卸載執行緒都會碰，所以用並行的 map。 */
     private val rejectAttempts = java.util.concurrent.ConcurrentHashMap<Long, Int>()
 
     /** 整批被拒時暫時縮小的批次量，用來二分逼近出問題的那一筆；成功後歸零。 */
     @Volatile private var batchLimitOverride = 0
+
+    /** 單次 _bulk 的位元組上限；遇到 413 會縮小，成功後逐步恢復。 */
+    @Volatile private var bulkByteLimit = MAX_BULK_BYTES
 
     /** 連線中斷只通報 Event log 一次，恢復後才重設。 */
     @Volatile private var outageReported = false
@@ -85,9 +95,13 @@ class ElasticUploader(
         return store.pendingCount
     }
 
+    /** 停止並等上傳執行緒收工，之後 drainBeforeExit 才能獨佔地跑，不會和它搶同一批。 */
     fun stop() {
         running = false
-        if (::thread.isInitialized) thread.interrupt()
+        if (::thread.isInitialized) {
+            thread.interrupt()
+            try { thread.join(5_000) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        }
     }
 
     private fun loop() {
@@ -140,7 +154,7 @@ class ElasticUploader(
         var bytes = 0L
         for (p in pending) {
             val size = p.docJson.length.toLong() + BULK_ACTION_OVERHEAD
-            if (count > 0 && bytes + size > MAX_BULK_BYTES) break
+            if (count > 0 && bytes + size > bulkByteLimit) break
             count++
             bytes += size
         }
@@ -180,9 +194,31 @@ class ElasticUploader(
                     throw RuntimeException(detail)
                 }
 
+                FailurePolicy.BatchOutcome.SHRINK_LIMIT -> {
+                    // 單筆仍然太大：縮小上限重送，而不是把這筆稽核紀錄刪掉
+                    bulkByteLimit = (bulkByteLimit / 2).coerceAtLeast(MIN_BULK_BYTES)
+                    logging.logToError(
+                        "[es-logger] request too large; reducing the bulk limit to " +
+                            "${bulkByteLimit / 1024} KB and retrying. $detail"
+                    )
+                    throw RuntimeException(detail)
+                }
+
                 FailurePolicy.BatchOutcome.DROP_BATCH -> {
-                    dropPermanently(batch, detail)
+                    // 即使 ES 說這筆資料不合法，也要給滿 MAX_DOC_ATTEMPTS 次才放棄
+                    val row = batch.single()
+                    val attempts = rejectAttempts.merge(row.seq, 1, Int::plus) ?: 1
+                    if (!FailurePolicy.shouldDropDocument(attempts)) {
+                        logging.logToError(
+                            "[es-logger] document seq ${row.seq} rejected (attempt $attempts of " +
+                                "${FailurePolicy.MAX_DOC_ATTEMPTS}): $detail"
+                        )
+                        throw RuntimeException(detail)
+                    }
+                    dropPermanently(batch, "rejected $attempts times — $detail")
                     batchLimitOverride = 0
+        // 成功一次就讓位元組上限慢慢長回去，避免一次 413 之後永遠小批上傳
+        if (bulkByteLimit < MAX_BULK_BYTES) bulkByteLimit = (bulkByteLimit * 2).coerceAtMost(MAX_BULK_BYTES)
                     return true
                 }
             }
@@ -206,7 +242,7 @@ class ElasticUploader(
         if (succeeded.isNotEmpty()) {
             // 確認進了 ES 就把本地那幾列刪掉：本地只當 outbox，不留第二份。
             store.purge(succeeded.map { it.seq })
-            uploadedTotal += succeeded.size
+            uploadedCounter.addAndGet(succeeded.size.toLong())
         }
 
         lastUploadAt = Instant.now()
@@ -229,6 +265,8 @@ class ElasticUploader(
         const val BULK_ACTION_OVERHEAD = 120L
         /** 退避上限；到頂就代表已經失敗超過一分鐘。 */
         const val MAX_BACKOFF_MS = 60_000L
+        /** 遇到 413 時位元組上限可以縮到多小。 */
+        const val MIN_BULK_BYTES = 256L * 1024
     }
 
     /**
@@ -242,7 +280,7 @@ class ElasticUploader(
         val seqs = rows.map { it.seq }
         store.purge(seqs)
         seqs.forEach { rejectAttempts.remove(it) }
-        rejectedTotal += rows.size
+        rejectedCounter.addAndGet(rows.size.toLong())
         lastError = "${rows.size} record(s) permanently rejected by Elasticsearch (seq ${seqs.joinToString()}) — $reason"
         logging.logToError(
             "[es-logger] GIVING UP on ${rows.size} record(s): seq ${seqs.joinToString()}. $reason\n" +

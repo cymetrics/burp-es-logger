@@ -33,7 +33,7 @@ class ExtensionMain : BurpExtension {
         uploader.start()
 
         // 所有工具的 HTTP 流量
-        api.http().registerHttpHandler(HttpCaptureHandler(writer))
+        val httpRegistration = api.http().registerHttpHandler(HttpCaptureHandler(writer))
 
         // WebSocket（可在設定關閉；關閉時仍註冊但建議重載 extension 以完全停止）
         if (config.captureWebSockets) {
@@ -53,8 +53,15 @@ class ExtensionMain : BurpExtension {
         // 關閉 / 重載時 flush
         api.extension().registerUnloadingHandler {
             log.logToOutput("[es-logger] unloading — draining the queue and flushing pending records")
+            // 先拔掉 handler：否則卸載期間仍有流量進來，那些訊息拿不到 seq，
+            // 遺失不會以缺號呈現。
+            try { httpRegistration.deregister() } catch (t: Throwable) {
+                log.logToError("[es-logger] could not deregister the HTTP handler: ${t.message}")
+            }
             writer.stop()
-            // 先盡量送出去再關閉：重載 extension 不該讓還沒上傳的紀錄消失
+            // 等 uploader 執行緒收工，drain 才能獨佔地跑 —— 否則兩者會同時抓同一批，
+            // 計數器與批次二分邏輯都會互相干擾。
+            uploader.stop()
             val stranded = uploader.drainBeforeExit(UNLOAD_UPLOAD_BUDGET_MS)
             if (stranded > 0) {
                 log.logToError(
@@ -63,7 +70,6 @@ class ExtensionMain : BurpExtension {
                         else " and were lost — the gap is visible as a jump in seq"
                 )
             }
-            uploader.stop()
             store.close()
         }
 

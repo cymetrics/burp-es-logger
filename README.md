@@ -41,10 +41,11 @@ altered. It does not prove that nothing is missing. Combine it with an append-on
 (see [`elasticsearch/setup.md`](elasticsearch/setup.md)) so a compromised testing machine cannot
 rewrite history.
 
-**Fast mode skips hashing for excluded static assets.** Images, fonts and CSS are the client's own
-content; hashing a few MB of PNG twice per request buys little evidence and costs real time. Those
-messages are marked `hashes_skipped: true` — the URL, status and timing still enter the chain.
-Turn it off if you need byte-level proof of every response.
+**Fast mode skips the body hash for excluded static assets.** Images, fonts and CSS are the client's
+own content, and their bodies are not stored anyway, so the separate `body_sha256` pass buys little
+evidence and costs real time. `raw_sha256` is always computed, so the message as a whole — headers,
+status line and body bytes — stays provable; only the standalone body digest is omitted, and the
+record is marked `hashes_skipped: true`. Turn it off if you want every digest unconditionally.
 
 **A record Elasticsearch will never accept is eventually dropped.** Server errors, throttling and
 authentication failures are retried indefinitely — the data is fine, the server or the key is not.
@@ -137,8 +138,10 @@ Sort by `seq` and recompute. Each field is prefixed with its own length in UTF-8
 field content can forge a boundary between fields:
 
 ```
-fields = [ seq, doc_id, type, request.time, response.time,
-           tool, method, url, status,
+fields = [ seq, doc_id, type,
+           session_id, tester_id, project_id, capture_host,
+           request.time, response.time,
+           tool, request.method, request.url, response.status,
            request.raw_sha256, request.body_sha256,
            response.raw_sha256, response.body_sha256 ]
 

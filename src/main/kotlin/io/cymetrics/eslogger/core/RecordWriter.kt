@@ -56,15 +56,58 @@ class RecordWriter(
     private var lastSweep = 0L
     private var lastDroppedSeen = 0L
     private var lastDropReport = 0L
+    private val discardLock = Any()
+    @Volatile private var lastDiscardReport = 0L
 
+    /**
+     * 從 Burp 的請求執行緒呼叫。
+     *
+     * 兩個必須同時成立的性質：
+     *  - 執行中時佇列滿了就擋住 Burp（寧可慢，不漏記）—— 所以這裡會等。
+     *  - 但停止之後必須立刻返回，否則卸載時 writer 已經不在消化佇列，
+     *    `acquireUninterruptibly` 會永遠不返回，Burp 關不掉。
+     *
+     * 停止後抵達的訊息沒有分配到 seq，不會在 index 裡留下缺號，所以要自己計數並通報 ——
+     * 否則就是一次「看不見的遺失」。
+     */
     fun submit(e: CaptureEvent) {
+        if (!running) {
+            noteDiscardedAfterStop()
+            return
+        }
         val cost = e.sizeBytes().coerceIn(1, MAX_QUEUE_BYTES)
-        memoryBudget.acquireUninterruptibly(cost)
-        try {
-            queue.put(e)
-        } catch (ie: InterruptedException) {
-            memoryBudget.release(cost)
-            Thread.currentThread().interrupt()
+        // 以短逾時輪詢而不是無限等待：仍在執行就繼續等（維持背壓），一旦停止就脫身。
+        while (running) {
+            if (memoryBudget.tryAcquire(cost, 1, TimeUnit.SECONDS)) {
+                if (!running) {
+                    memoryBudget.release(cost)
+                    break
+                }
+                if (!queue.offer(e)) memoryBudget.release(cost)
+                return
+            }
+        }
+        noteDiscardedAfterStop()
+    }
+
+    /** 關閉期間丟掉的訊息數。這是唯一不會以 seq 缺號呈現的遺失，所以必須大聲講。 */
+    @Volatile var discardedAfterStop: Long = 0
+        private set
+
+    private fun noteDiscardedAfterStop() {
+        synchronized(discardLock) {
+            discardedAfterStop++
+            val now = System.currentTimeMillis()
+            if (now - lastDiscardReport < DROP_REPORT_INTERVAL_MS) return
+            lastDiscardReport = now
+            logging.logToError(
+                "[es-logger] $discardedAfterStop message(s) arrived after the logger stopped and were " +
+                    "not recorded — they have no seq, so they leave no gap. Unload or restart Burp " +
+                    "while idle to avoid this."
+            )
+            logging.raiseCriticalEvent(
+                "ES Logger: $discardedAfterStop message(s) were not recorded because the extension is shutting down"
+            )
         }
     }
 
@@ -189,10 +232,10 @@ class RecordWriter(
             val headText = String(req.raw, 0, req.bodyOffset, Charsets.ISO_8859_1)
             val ex = exclusion(req.url, contentType(headText))
             val hashed = shouldHash(ex, req.bodyLength)
-            if (hashed) {
-                reqRawSha = Hashing.sha256Hex(req.raw)
-                reqBodySha = Hashing.sha256Hex(req.raw, req.bodyOffset, req.bodyLength)
-            }
+            // raw 一定算：它涵蓋 headers 與請求行，省掉的話被排除的那些紀錄
+            // 連「當時送了什麼標頭」都無法舉證。極速模式只省另外一次 body 雜湊。
+            reqRawSha = Hashing.sha256Hex(req.raw)
+            if (hashed) reqBodySha = Hashing.sha256Hex(req.raw, req.bodyOffset, req.bodyLength)
 
             val o = JsonObject()
             o.addProperty("time", req.ts.toString())
@@ -203,7 +246,7 @@ class RecordWriter(
             o.addProperty("secure", req.secure)
             o.addProperty("headers", headText)
             addBody(o, req.raw, req.bodyOffset, req.bodyLength, reqBodySha, hashed, ex, contentType(headText))
-            if (hashed) o.addProperty("raw_sha256", reqRawSha)
+            o.addProperty("raw_sha256", reqRawSha)
             doc.add("request", o)
         }
 
@@ -215,22 +258,23 @@ class RecordWriter(
             // response body 用對應 request 的 URL 判斷副檔名
             val ex = exclusion(req?.url ?: "", ct)
             val hashed = shouldHash(ex, resp.bodyLength)
-            if (hashed) {
-                respRawSha = Hashing.sha256Hex(resp.raw)
-                respBodySha = Hashing.sha256Hex(resp.raw, resp.bodyOffset, resp.bodyLength)
-            }
+            respRawSha = Hashing.sha256Hex(resp.raw)
+            if (hashed) respBodySha = Hashing.sha256Hex(resp.raw, resp.bodyOffset, resp.bodyLength)
 
             val o = JsonObject()
             o.addProperty("time", resp.ts.toString())
             o.addProperty("status", resp.statusCode)
             o.addProperty("headers", headText)
             addBody(o, resp.raw, resp.bodyOffset, resp.bodyLength, respBodySha, hashed, ex, ct)
-            if (hashed) o.addProperty("raw_sha256", respRawSha)
+            o.addProperty("raw_sha256", respRawSha)
             doc.add("response", o)
         }
 
+        // 身分欄位必須入鏈：稽核報告的主張是「這些流量是這位測試者在這個案子產生的」，
+        // 若 session / tester / project / host 不在 material 裡，在 ES 改掉它們不會破壞任何雜湊。
         val material = listOf(
             seq.toString(), docId, type,
+            sessionId, config.testerId, config.projectId, hostName,
             req?.ts?.toString() ?: "", resp?.ts?.toString() ?: "",
             req?.tool ?: "", req?.method ?: "", req?.url ?: "",
             resp?.statusCode?.toString() ?: "",
@@ -260,8 +304,11 @@ class RecordWriter(
         doc.add("websocket", o)
 
         val material = listOf(
-            seq.toString(), docId, "websocket", e.ts.toString(), "",
-            e.tool, e.direction, e.url, "", payloadSha, "", "", ""
+            seq.toString(), docId, "websocket",
+            sessionId, config.testerId, config.projectId, hostName,
+            e.ts.toString(), "",
+            e.tool, e.direction, e.url, e.isText.toString(),
+            payloadSha, "", "", ""
         )
         writeRecord(seq, docId, prev, material, doc)
     }
@@ -288,7 +335,10 @@ class RecordWriter(
         integrity.addProperty("algo", "sha256")
         integrity.addProperty(
             "scheme",
-            "record_sha256 = sha256(prev_hash || for each field: len(utf8) || ':' || field)"
+            "record_sha256 = sha256(prev_hash || for each field: len(utf8) || ':' || field); " +
+                "fields = seq, doc_id, type, session_id, tester_id, project_id, capture_host, " +
+                "request.time, response.time, tool, request.method, request.url, response.status, " +
+                "request.raw_sha256, request.body_sha256, response.raw_sha256, response.body_sha256"
         )
         integrity.addProperty("prev_hash", prev)
         integrity.addProperty("record_sha256", recordHash)
@@ -401,7 +451,8 @@ class RecordWriter(
     }
 
     /**
-     * 極速模式只對「本來就不會保存的靜態資源 body」生效：連 raw 與 body 雜湊都省掉。
+     * 極速模式只省「被排除的靜態資源 body」那一次雜湊。整包訊息的 raw_sha256 一律計算 ——
+     * 省掉它的話，那些紀錄連 headers 與狀態列都無法舉證，等於整筆不可驗證。
      *
      * 刻意不套用到 storeBodies=false —— 那個模式的全部價值就是雜湊，
      * 連雜湊都省掉等於什麼都沒記。空 body 也照算，反正不花錢。

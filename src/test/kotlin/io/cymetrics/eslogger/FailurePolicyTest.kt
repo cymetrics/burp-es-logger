@@ -27,13 +27,28 @@ class FailurePolicyTest {
     @Test
     fun `a rejected multi-document batch is split to find the offending record`() {
         assertEquals(BatchOutcome.SPLIT_BATCH, FailurePolicy.classifyHttp(400, batchSize = 500))
-        assertEquals(BatchOutcome.SPLIT_BATCH, FailurePolicy.classifyHttp(413, batchSize = 2))
     }
 
     @Test
     fun `a single document the server keeps rejecting is dropped so the queue can move`() {
         assertEquals(BatchOutcome.DROP_BATCH, FailurePolicy.classifyHttp(400, batchSize = 1))
-        assertEquals(BatchOutcome.DROP_BATCH, FailurePolicy.classifyHttp(413, batchSize = 1))
+    }
+
+    @Test
+    fun `a wrong endpoint is a configuration error, never a reason to destroy records`() {
+        // 404 = endpoint 打錯字、少了路徑前綴、或指到 Kibana。若當成「資料有問題」，
+        // 切批會一路切到單筆然後逐筆丟棄，一個字母的錯字就會刪光整場測試的證據。
+        assertEquals(BatchOutcome.RETRY_LATER, FailurePolicy.classifyHttp(404, batchSize = 500))
+        assertEquals(BatchOutcome.RETRY_LATER, FailurePolicy.classifyHttp(404, batchSize = 1))
+        assertEquals(BatchOutcome.RETRY_LATER, FailurePolicy.classifyHttp(405, batchSize = 1))
+    }
+
+    @Test
+    fun `a payload too large is shrunk, not discarded`() {
+        // 413 代表「這批太大」，不是「這筆資料壞掉」。單筆仍然太大時要縮小上限重送，
+        // 丟掉它等於拿中介設備的限制去刪稽核紀錄。
+        assertEquals(BatchOutcome.SPLIT_BATCH, FailurePolicy.classifyHttp(413, batchSize = 2))
+        assertEquals(BatchOutcome.SHRINK_LIMIT, FailurePolicy.classifyHttp(413, batchSize = 1))
     }
 
     @Test

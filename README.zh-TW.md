@@ -36,9 +36,10 @@ Elasticsearch 一確認就刪除。Burp 關閉或積壓超過上限時，未送�
 不是「沒有東西不見」。請搭配 append-only 的 API key（見
 [`elasticsearch/setup.md`](elasticsearch/setup.md)），讓測試機即使被入侵也改不了已上傳的紀錄。
 
-**極速模式會跳過被排除靜態資源的雜湊。** 圖片、字型、CSS 是客戶自己的資源，
-為了幾 MB 的 PNG 做兩次雜湊換不到什麼舉證力，卻實際花時間。那些訊息會標記
-`hashes_skipped: true`，URL、狀態碼與時間仍然入鏈。需要每一筆回應都有位元組級證據就關掉它。
+**極速模式只省被排除靜態資源的 body 雜湊。** 圖片、字型、CSS 是客戶自己的資源，
+本來就不會保存 body，額外那次 `body_sha256` 換不到舉證力卻實際花時間。
+`raw_sha256` 一律計算，所以整包訊息（標頭、狀態列、body 位元組）仍然可驗證，
+只是少了單獨的 body 摘要，紀錄會標記 `hashes_skipped: true`。想要每個摘要都無條件計算就關掉它。
 
 **ES 永遠不會接受的紀錄最終會被放棄。** 伺服器錯誤、流量限制與認證失敗都會無限重試 ——
 那是伺服器或金鑰的問題，資料本身沒錯。但若是文件自身的問題（例如 mapping 衝突），
@@ -127,8 +128,10 @@ Kibana 的 Dev Tools。
 因此任何欄位內容都無法偽造欄位邊界：
 
 ```
-fields = [ seq, doc_id, type, request.time, response.time,
-           tool, method, url, status,
+fields = [ seq, doc_id, type,
+           session_id, tester_id, project_id, capture_host,
+           request.time, response.time,
+           tool, request.method, request.url, response.status,
            request.raw_sha256, request.body_sha256,
            response.raw_sha256, response.body_sha256 ]
 
