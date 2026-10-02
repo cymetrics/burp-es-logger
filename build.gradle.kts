@@ -1,7 +1,7 @@
 plugins {
     kotlin("jvm") version "2.0.21"
     // 打包 fat jar（把 sqlite-jdbc / gson 一起塞進去）
-    id("com.gradleup.shadow") version "8.3.5"
+    id("com.gradleup.shadow") version "9.6.1"
 }
 
 group = "io.cymetrics"
