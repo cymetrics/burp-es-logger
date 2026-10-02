@@ -248,7 +248,7 @@ class SettingsPanel(
     }
 
     private fun buildFooter(): JPanel {
-        val stats = JPanel(WrapLayout(FlowLayout.LEFT, 30, 10)).apply {
+        val stats = JPanel(WrapLayout(FlowLayout.LEFT, 36, 12)).apply {
             isOpaque = false
             alignmentX = Component.LEFT_ALIGNMENT
             add(statUploaded); add(statPending); add(statQueue); add(statSpool); add(statLast)
@@ -308,9 +308,9 @@ class SettingsPanel(
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
             add(stats)
-            add(Box.createVerticalStrut(4))
-            add(buttons)
             add(Box.createVerticalStrut(8))
+            add(buttons)
+            add(Box.createVerticalStrut(10))
             add(statusRow)
         }
     }
@@ -324,12 +324,12 @@ class SettingsPanel(
         val gutter = ((width - COLUMN_WIDTH) / 2).coerceAtLeast(MIN_GUTTER)
         headerPanel.border = BorderFactory.createCompoundBorder(
             BorderFactory.createMatteBorder(0, 0, 1, 0, separatorFg),
-            BorderFactory.createEmptyBorder(16, gutter, 14, gutter)
+            BorderFactory.createEmptyBorder(20, gutter, 18, gutter)
         )
-        contentPanel.border = BorderFactory.createEmptyBorder(18, gutter, 18, gutter)
+        contentPanel.border = BorderFactory.createEmptyBorder(26, gutter, 28, gutter)
         footerPanel.border = BorderFactory.createCompoundBorder(
             BorderFactory.createMatteBorder(1, 0, 0, 0, separatorFg),
-            BorderFactory.createEmptyBorder(10, gutter, 12, gutter)
+            BorderFactory.createEmptyBorder(14, gutter, 16, gutter)
         )
         revalidate()
     }
@@ -344,18 +344,22 @@ class SettingsPanel(
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
             add(head)
-            add(Box.createVerticalStrut(8))
-            add(JSeparator().apply { alignmentX = Component.LEFT_ALIGNMENT })
+            add(Box.createVerticalStrut(10))
+            add(JSeparator().apply {
+                alignmentX = Component.LEFT_ALIGNMENT
+                foreground = separatorFg
+                background = separatorFg
+            })
         }
 
-        val panel = object : JPanel(BorderLayout(0, 14)) {
+        val panel = object : JPanel(BorderLayout(0, 18)) {
             override fun getMaximumSize(): Dimension =
                 Dimension(COLUMN_WIDTH, super.getPreferredSize().height)
         }
         return panel.apply {
             isOpaque = false
             alignmentX = Component.LEFT_ALIGNMENT
-            border = BorderFactory.createEmptyBorder(0, 0, if (last) 0 else 34, 0)
+            border = BorderFactory.createEmptyBorder(0, 0, if (last) 0 else 44, 0)
             add(headBox, BorderLayout.NORTH)
             add(body, BorderLayout.CENTER)
         }
@@ -382,7 +386,7 @@ class SettingsPanel(
             alignmentX = Component.LEFT_ALIGNMENT
         }
         private val captionLabel = JLabel().apply {
-            foreground = mutedFg
+            foreground = captionFg
             font = baseFont.deriveFont(baseFont.size2D - 1f)
             alignmentX = Component.LEFT_ALIGNMENT
         }
@@ -541,15 +545,34 @@ class SettingsPanel(
     private val baseFont: Font
         get() = UIManager.getFont("Label.font") ?: Font(Font.SANS_SERIF, Font.PLAIN, 12)
 
-    private val mutedFg: Color
-        get() = UIManager.getColor("Label.disabledForeground")
-            ?: UIManager.getColor("textInactiveText")
-            ?: Color(0x88, 0x88, 0x88)
+    private val labelFg: Color
+        get() = UIManager.getColor("Label.foreground") ?: Color(0x33, 0x33, 0x33)
 
-    private val separatorFg: Color
-        get() = UIManager.getColor("Separator.foreground")
-            ?: UIManager.getColor("controlShadow")
-            ?: mutedFg
+    private val surfaceBg: Color
+        get() = UIManager.getColor("Panel.background") ?: Color.WHITE
+
+    /**
+     * 把前景往背景方向混，而不是直接用 `Label.disabledForeground`。
+     *
+     * 佈景給的 disabled 色只保證「看起來不可用」，不保證比本文淡多少 —— Burp 的淺色
+     * 佈景下它幾乎和標籤同深，說明文字就壓不下去。用混色才能確保層次在深淺兩種
+     * 佈景下都成立。
+     */
+    private fun fade(ratio: Double): Color {
+        val fg = labelFg
+        val bg = surfaceBg
+        fun mix(a: Int, b: Int) = (a * (1 - ratio) + b * ratio).toInt().coerceIn(0, 255)
+        return Color(mix(fg.red, bg.red), mix(fg.green, bg.green), mix(fg.blue, bg.blue))
+    }
+
+    /** 說明文字：明顯退到背景，但仍可讀。 */
+    private val mutedFg: Color get() = fade(0.45)
+
+    /** 狀態磚的標題：比說明再深一點，因為它是在解釋旁邊那個數字。 */
+    private val captionFg: Color get() = fade(0.36)
+
+    /** 分隔線：只要能界定範圍即可，不該和文字搶注意力。 */
+    private val separatorFg: Color get() = fade(0.84)
 
     private fun muted(text: String): WrapText =
         WrapText(baseFont.deriveFont(baseFont.size2D - 1f), mutedFg).apply { this.text = text }
@@ -784,12 +807,12 @@ private class ResponsiveForm(
         const val TWO_COLUMN_MIN = 520
         const val MIN_FIELD = 200
         const val PREFERRED_WIDTH = 820
-        const val HGAP = 16
-        const val ROW_GAP = 10
+        const val HGAP = 18
+        const val ROW_GAP = 12
         /** 說明緊貼它說明的那個欄位，下一列才拉開 —— 製造「一組一組」的節奏。 */
-        const val NOTE_GAP = 12
+        const val NOTE_GAP = 14
         /** 欄位到它自己的說明之間，刻意比列距小。 */
-        const val HINT_GAP = 3
+        const val HINT_GAP = 5
         /** 勾選框文字的左緣，說明要對齊這裡。 */
         val CHECKBOX_INDENT = (UIManager.getIcon("CheckBox.icon")?.iconWidth ?: 16) + 6
     }
