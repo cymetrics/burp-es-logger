@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 驗證 gradle-wrapper.jar 的雜湊是官方發行版，避免被掉包的 wrapper 在 CI 上執行任意程式碼
       - uses: gradle/actions/wrapper-validation@v4
