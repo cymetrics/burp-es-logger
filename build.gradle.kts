@@ -13,7 +13,7 @@ repositories {
 }
 
 // Montoya API 版本：請對應你的 Burp 版本，通常新版本向後相容。
-val montoyaVersion = "2023.12.1"
+val montoyaVersion = "2026.7"
 
 dependencies {
     // Burp 執行時會自己提供 Montoya，所以只編譯用、不要打包進 jar
