@@ -41,6 +41,12 @@ kotlin {
     jvmToolchain(17)
 }
 
+// 關掉內建的瘦 jar。它會和 shadowJar 一起躺在 build/libs，但缺少 sqlite-jdbc 與 gson，
+// 載進 Burp 會在執行時才炸 —— 兩個 jar 擺在一起只會讓人拿錯。
+tasks.jar {
+    enabled = false
+}
+
 tasks.shadowJar {
     // 檔名不帶版本號：Burp 裡 extension 的路徑是固定的，帶版本的話每次改版都要重新
     // Add 一次，Auto-reload 也會指到舊檔。版本資訊由 git tag 與 release 負責。

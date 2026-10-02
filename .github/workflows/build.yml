@@ -31,11 +31,15 @@ jobs:
       - name: Build shadow jar
         run: ./gradlew --no-daemon shadowJar
 
+      # Burp 不看 manifest，它找 META-INF/services 裡的宣告。少了這個檔案 jar 仍然編得出來，
+      # 但載入時會被拒絕 —— 所以在發布前擋下來。
       - name: Verify the Montoya entry point is declared
         run: |
           set -euo pipefail
-          jar=$(ls build/libs/*.jar)
-          entry=$(unzip -p "$jar" META-INF/services/burp.api.montoya.BurpExtension)
+          ls -l build/libs
+          jar=build/libs/burp-es-logger.jar
+          test -f "$jar"
+          entry=$(unzip -p "$jar" META-INF/services/burp.api.montoya.BurpExtension | tr -d '\r\n')
           echo "entry point: $entry"
           test "$entry" = "io.cymetrics.eslogger.ExtensionMain"
 
