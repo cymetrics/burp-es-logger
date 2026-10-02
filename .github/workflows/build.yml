@@ -39,7 +39,7 @@ jobs:
           echo "entry point: $entry"
           test "$entry" = "io.cymetrics.eslogger.ExtensionMain"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: burp-es-logger-jar
           path: build/libs/*.jar
