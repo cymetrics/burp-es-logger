@@ -1,5 +1,8 @@
 # ES Logger
 
+[![Build](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml/badge.svg)](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 把 Burp 經手的每一筆 HTTP / WebSocket 流量記錄到 Elasticsearch 的擴充，
 並以 SHA-256 hash chain 讓「刪改」留下痕跡。
 
@@ -40,7 +43,7 @@ Elasticsearch 一確認就刪除。Burp 關閉或積壓超過上限時，未送�
 **body 會被過濾，但指紋不會。** 被排除或截斷的 body 仍會記下 `body_len`，
 以及（極速模式未套用時）`body_sha256` —— 足以證明某個特定內容曾經通過，而不必保存它。
 
-## 編譯
+## 自行編譯
 
 需要 JDK 17，Gradle wrapper 已附在 repo 內。
 
@@ -52,6 +55,14 @@ JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew shadowJar
 jar 內含 macOS、Windows、Linux（含 musl）的 SQLite 原生函式庫，同一個檔案在各平台都能用。
 
 ## 安裝
+
+到 [Releases](https://github.com/cymetrics/burp-es-logger/releases) 下載最新的
+`burp-es-logger-<版本>.jar`，或自行編譯（見下一節）。每個 release 的 jar 旁邊都附
+`.sha256`，載入 Burp 之前請先驗證：
+
+```bash
+shasum -a 256 -c burp-es-logger-<版本>.jar.sha256
+```
 
 Burp → Extensions → Add → Extension type 選 **Java** → 選那個 jar，會多出 **ES Logger** 分頁。
 

@@ -1,0 +1,44 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 驗證 gradle-wrapper.jar 的雜湊是官方發行版，避免被掉包的 wrapper 在 CI 上執行任意程式碼
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build shadow jar
+        run: ./gradlew --no-daemon shadowJar
+
+      - name: Verify the Montoya entry point is declared
+        run: |
+          set -euo pipefail
+          jar=$(ls build/libs/*.jar)
+          entry=$(unzip -p "$jar" META-INF/services/burp.api.montoya.BurpExtension)
+          echo "entry point: $entry"
+          test "$entry" = "io.cymetrics.eslogger.ExtensionMain"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: burp-es-logger-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 14

@@ -1,5 +1,8 @@
 # ES Logger
 
+[![Build](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml/badge.svg)](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A Burp Suite extension that records every HTTP and WebSocket message Burp handles
 into Elasticsearch, with a SHA-256 hash chain that makes deletion or tampering detectable.
 
@@ -47,7 +50,7 @@ Turn it off if you need byte-level proof of every response.
 `body_len` and (unless fast mode applies) `body_sha256`, which is enough to prove a specific
 payload passed through without storing it.
 
-## Build
+## Build from source
 
 Requires JDK 17. The Gradle wrapper is included.
 
@@ -60,6 +63,14 @@ The jar bundles native SQLite binaries for macOS, Windows and Linux (including m
 artifact works everywhere Burp runs.
 
 ## Install
+
+Download the latest `burp-es-logger-<version>.jar` from
+[Releases](https://github.com/cymetrics/burp-es-logger/releases), or build it yourself (below).
+Each release ships a `.sha256` next to the jar — verify it before loading anything into Burp:
+
+```bash
+shasum -a 256 -c burp-es-logger-<version>.jar.sha256
+```
 
 Burp → Extensions → Add → Extension type **Java** → select the jar. An **ES Logger** tab appears.
 

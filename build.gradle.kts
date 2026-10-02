@@ -5,7 +5,8 @@ plugins {
 }
 
 group = "io.cymetrics"
-version = "0.1.0"
+// 平常用預設值；發版時由 release workflow 以 -PappVersion=<tag 去掉 v> 覆寫
+version = (findProperty("appVersion") as String?) ?: "0.1.0"
 
 repositories {
     mavenCentral()
