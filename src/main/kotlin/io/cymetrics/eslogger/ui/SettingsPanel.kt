@@ -88,11 +88,10 @@ class SettingsPanel(
     private var statusText: (Strings) -> String = { "" }
     private var statusTone = Tone.IDLE
 
-    /**
-     * 必須宣告在 init 區塊之前。Kotlin 依宣告順序初始化屬性，宣告在 init 後面的話，
-     * init 裡呼叫 startStatsTimer() 時它還是 null —— 編譯不會抱怨，載入擴充時才 NPE。
-     */
     private val statsTimer = Timer(STATS_REFRESH_MS) { refreshStats() }
+
+    /** 給測試驗證 [dispose] 真的把計時器停掉了。 */
+    internal val statsTimerRunning: Boolean get() = statsTimer.isRunning
 
     // 三個區塊的左右留白會隨視窗寬度改變，把內容維持成一個置中的欄。
     private lateinit var headerPanel: JPanel

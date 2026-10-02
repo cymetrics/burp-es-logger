@@ -6,6 +6,7 @@ import io.cymetrics.eslogger.core.RecordWriter
 import io.cymetrics.eslogger.fakes.FakeLogging
 import io.cymetrics.eslogger.fakes.FakePreferences
 import io.cymetrics.eslogger.fakes.RecordingSpool
+import io.cymetrics.eslogger.fakes.testConfig
 import io.cymetrics.eslogger.integrity.Hashing
 import io.cymetrics.eslogger.model.ReqData
 import io.cymetrics.eslogger.model.RequestCaptured
@@ -29,10 +30,7 @@ import kotlin.test.assertTrue
 class ChainContinuityTest {
 
     private fun writer(prefs: FakePreferences, project: String, spool: RecordSpool): RecordWriter {
-        val config = Config(prefs).apply {
-            testerId = "zet"; projectId = project; persistLocally = false; save()
-        }
-        return RecordWriter(config, spool, FakeLogging())
+        return RecordWriter(testConfig(prefs, project = project), spool, FakeLogging())
     }
 
     private fun exchange(w: RecordWriter, id: Int) {

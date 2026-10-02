@@ -1,6 +1,10 @@
+// Montoya 的 Preferences 介面裡 byte / short 那組存取器已標記棄用，但實作介面仍得覆寫它們。
+@file:Suppress("OVERRIDE_DEPRECATION")
+
 package io.cymetrics.eslogger.fakes
 
 import burp.api.montoya.logging.Logging
+import io.cymetrics.eslogger.config.Config
 import burp.api.montoya.persistence.Preferences
 import io.cymetrics.eslogger.integrity.Hashing
 import io.cymetrics.eslogger.storage.NewRecord
@@ -10,7 +14,12 @@ import io.cymetrics.eslogger.storage.SpoolKind
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 
-/** Burp 偏好設定的記憶體版本。設定與鏈尾都走這裡，所以測試可以模擬「重載」。 */
+/**
+ * Burp 偏好設定的記憶體版本。設定與鏈尾都走這裡，所以測試可以模擬「重載」。
+ *
+ * byte / short 那組存取器在 Montoya 已標記棄用，但介面仍要求實作，所以單獨抑制警告 ——
+ * 留著噪音的話，哪天開啟 allWarningsAsErrors 就會從測試開始壞。
+ */
 class FakePreferences : Preferences {
     private val strings = HashMap<String, String>()
     private val booleans = HashMap<String, Boolean>()
@@ -99,4 +108,20 @@ class RecordingSpool : RecordSpool {
     }
 
     override fun close() {}
+}
+
+/**
+ * 測試共用的設定。三個測試類別原本各自組一份，而且其中一份忘了設 persistLocally，
+ * 預設值一變它就會悄悄改測另一條分支。
+ */
+fun testConfig(
+    prefs: FakePreferences = FakePreferences(),
+    tester: String = "zet",
+    project: String = "acme",
+    persistLocally: Boolean = false
+): Config = Config(prefs).apply {
+    this.testerId = tester
+    this.projectId = project
+    this.persistLocally = persistLocally
+    save()
 }

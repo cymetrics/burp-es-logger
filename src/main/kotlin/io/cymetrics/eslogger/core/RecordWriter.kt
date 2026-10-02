@@ -55,6 +55,20 @@ class RecordWriter(
     private var curSeq: Long
     private var curHash: String
 
+    /** 累積到一定量或佇列排空才寫進 SQLite，減少 commit 次數。 */
+    private val writeBuffer = ArrayList<NewRecord>(MAX_WRITE_BATCH)
+
+    @Volatile private var running = false
+    private lateinit var thread: Thread
+    private var lastSweep = 0L
+    private var lastDroppedSeen = 0L
+    private var lastDropReport = 0L
+    private val discardLock = Any()
+    @Volatile private var lastDiscardReport = 0L
+
+    // init 放在所有屬性宣告之後。Kotlin 依宣告順序初始化，init 若讀到宣告在它後面的
+    // 屬性，編譯器不會抱怨（只要經過一層函式呼叫），執行時才 NPE —— SettingsPanel
+    // 就是這樣壞掉的。放在最後面就沒有這個可能。
     init {
         val (tipSeq, tipHash) = chainTip.loadChainTip()
         if (store.lastSeq >= tipSeq) {
@@ -66,16 +80,6 @@ class RecordWriter(
         }
     }
 
-    /** 累積到一定量或佇列排空才寫進 SQLite，減少 commit 次數。 */
-    private val writeBuffer = ArrayList<NewRecord>(MAX_WRITE_BATCH)
-
-    @Volatile private var running = false
-    private lateinit var thread: Thread
-    private var lastSweep = 0L
-    private var lastDroppedSeen = 0L
-    private var lastDropReport = 0L
-    private val discardLock = Any()
-    @Volatile private var lastDiscardReport = 0L
 
     /**
      * 從 Burp 的請求執行緒呼叫。

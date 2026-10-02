@@ -5,11 +5,14 @@ import io.cymetrics.eslogger.core.RecordWriter
 import io.cymetrics.eslogger.fakes.FakeLogging
 import io.cymetrics.eslogger.fakes.FakePreferences
 import io.cymetrics.eslogger.fakes.RecordingSpool
+import io.cymetrics.eslogger.fakes.testConfig
 import io.cymetrics.eslogger.ui.SettingsPanel
 import io.cymetrics.eslogger.upload.ElasticUploader
 import javax.swing.SwingUtilities
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * 面板只要能被建構出來就值得測。
@@ -21,8 +24,7 @@ import kotlin.test.assertNotNull
 class SettingsPanelTest {
 
     private fun buildPanel(): SettingsPanel {
-        val prefs = FakePreferences()
-        val config = Config(prefs).apply { testerId = "zet"; projectId = "demo"; save() }
+        val config = testConfig(project = "demo")
         val spool = RecordingSpool()
         val logging = FakeLogging()
         return SettingsPanel(config, spool, ElasticUploader(config, spool, logging), RecordWriter(config, spool, logging))
@@ -44,9 +46,13 @@ class SettingsPanelTest {
         try {
             // rebuild() 以 invokeLater 收尾，排空佇列才看得到那段的例外
             SwingUtilities.invokeAndWait { }
+            assertTrue(panel.statsTimerRunning, "start() should have armed the stats timer")
         } finally {
             // 無論如何都要停掉計時器，否則它會在共用的測試 JVM 裡每 5 秒觸發到結束
             SwingUtilities.invokeAndWait { panel.dispose() }
         }
+        // dispose 的全部意義就是停掉這個計時器 —— 不驗證的話，哪天它變成空殼也不會有人發現，
+        // API key 就會跟著面板被留在記憶體裡
+        assertFalse(panel.statsTimerRunning, "dispose() must stop the stats timer")
     }
 }

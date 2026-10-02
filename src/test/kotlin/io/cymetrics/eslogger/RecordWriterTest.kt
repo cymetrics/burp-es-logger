@@ -7,6 +7,7 @@ import io.cymetrics.eslogger.core.RecordWriter
 import io.cymetrics.eslogger.fakes.FakeLogging
 import io.cymetrics.eslogger.fakes.FakePreferences
 import io.cymetrics.eslogger.fakes.RecordingSpool
+import io.cymetrics.eslogger.fakes.testConfig
 import io.cymetrics.eslogger.integrity.Hashing
 import io.cymetrics.eslogger.model.ReqData
 import io.cymetrics.eslogger.model.RequestCaptured
@@ -65,12 +66,7 @@ class RecordWriterTest {
     // ---- 測試用具 ----
 
     private fun config(prefs: FakePreferences = FakePreferences(), tester: String = "zet", project: String = "acme") =
-        Config(prefs).apply {
-            testerId = tester
-            projectId = project
-            persistLocally = false
-            save()
-        }
+        testConfig(prefs, tester, project)
 
     private fun exchange(writer: RecordWriter, id: Int, url: String, body: String = "hello") {
         val head = "GET /x HTTP/1.1\r\nHost: target\r\n\r\n".toByteArray()
