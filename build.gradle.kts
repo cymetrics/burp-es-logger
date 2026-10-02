@@ -1,7 +1,7 @@
 plugins {
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.4.20"
     // 打包 fat jar（把 sqlite-jdbc / gson 一起塞進去）
-    id("com.gradleup.shadow") version "8.3.5"
+    id("com.gradleup.shadow") version "8.3.11"
 }
 
 group = "io.cymetrics"
@@ -20,8 +20,8 @@ dependencies {
     compileOnly("net.portswigger.burp.extensions:montoya-api:$montoyaVersion")
 
     // 這兩個要打包進 jar（Burp 不提供）
-    implementation("org.xerial:sqlite-jdbc:3.46.1.3")
-    implementation("com.google.code.gson:gson:2.11.0")
+    implementation("org.xerial:sqlite-jdbc:3.53.4.0")
+    implementation("com.google.code.gson:gson:2.14.0")
 
     implementation(kotlin("stdlib"))
 
