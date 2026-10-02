@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.4.20"
     // 打包 fat jar（把 sqlite-jdbc / gson 一起塞進去）
     id("com.gradleup.shadow") version "8.3.5"
 }
