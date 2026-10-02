@@ -475,10 +475,22 @@ class SettingsPanel(
             config.projectId = tfProject.text
             config.excludedExtensions = tfExcluded.text.split(",")
                 .map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
-            config.maxStoredBodyBytes = tfMaxBody.text.trim().toIntOrNull() ?: config.maxStoredBodyBytes
-            config.uploadIntervalSeconds = tfInterval.text.trim().toIntOrNull() ?: config.uploadIntervalSeconds
-            config.uploadBatchSize = tfBatch.text.trim().toIntOrNull() ?: config.uploadBatchSize
-            config.requestTimeoutSeconds = tfReqTimeout.text.trim().toIntOrNull() ?: config.requestTimeoutSeconds
+            // 夾住範圍而不是照單全收。例如每批筆數填 0 會讓 pendingBatch 永遠回空集合，
+            // 上傳就此靜默停止，而狀態列還顯示「已儲存」—— 這種失敗完全看不出來。
+            var clamped = false
+            fun clamp(field: JTextField, current: Int, min: Int, max: Int): Int {
+                val parsed = field.text.trim().toIntOrNull() ?: return current
+                val bounded = parsed.coerceIn(min, max)
+                if (bounded != parsed) {
+                    clamped = true
+                    field.text = bounded.toString()
+                }
+                return bounded
+            }
+            config.maxStoredBodyBytes = clamp(tfMaxBody, config.maxStoredBodyBytes, 0, 64 * 1024 * 1024)
+            config.uploadIntervalSeconds = clamp(tfInterval, config.uploadIntervalSeconds, 1, 3600)
+            config.uploadBatchSize = clamp(tfBatch, config.uploadBatchSize, 1, 10_000)
+            config.requestTimeoutSeconds = clamp(tfReqTimeout, config.requestTimeoutSeconds, 5, 86_400)
             config.captureWebSockets = cbWs.isSelected
             config.storeBodies = cbStoreBodies.isSelected
             config.fastMode = cbFast.isSelected
@@ -488,7 +500,8 @@ class SettingsPanel(
             tfEndpoint.text = config.esEndpoint
             dirty = false
             updateDerivedLabels()
-            setStatus(Tone.OK) { it.saved(config.indexName()) }
+            if (clamped) setStatus(Tone.WARN) { it.clampedToRange(config.indexName()) }
+            else setStatus(Tone.OK) { it.saved(config.indexName()) }
         } catch (t: Throwable) {
             val msg = t.message
             setStatus(Tone.ERR) { it.saveFailed(msg) }
@@ -530,8 +543,17 @@ class SettingsPanel(
         else -> "$bytes B"
     }
 
-    private fun startStatsTimer() {
-        Timer(5000) { refreshStats() }.apply { isRepeats = true }.start()
+    private val statsTimer = Timer(5000) { refreshStats() }.apply { isRepeats = true }
+
+    private fun startStatsTimer() = statsTimer.start()
+
+    /**
+     * 卸載時務必呼叫。Swing 的 Timer 掛在共用的 timer queue 上，不停掉的話即使分頁
+     * 已經消失它仍會繼續觸發，並且讓整個 SettingsPanel → Config → **API key** 無法回收。
+     * 開發時反覆重載十次就是十份活著的憑證。
+     */
+    fun dispose() {
+        statsTimer.stop()
     }
 
     private enum class Tone { IDLE, OK, WARN, ERR }

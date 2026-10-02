@@ -177,7 +177,10 @@ class SqliteStore(private val dbPath: String) : RecordSpool {
         val out = ArrayList<Pending>(minOf(limit, 512))
         pendingStmt.setInt(1, limit)
         pendingStmt.executeQuery().use { rs ->
-            while (rs.next()) out.add(Pending(rs.getLong(1), rs.getString(2), rs.getString(3)))
+            while (rs.next()) {
+                val json = rs.getString(3)
+                out.add(Pending(rs.getLong(1), rs.getString(2), json, json.toByteArray(Charsets.UTF_8).size))
+            }
         }
         out
     }

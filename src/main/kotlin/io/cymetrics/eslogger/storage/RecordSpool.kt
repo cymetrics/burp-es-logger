@@ -5,14 +5,23 @@ data class NewRecord(
     val seq: Long,
     val docId: String,
     val recordHash: String,
-    val docJson: String
+    val docJson: String,
+    /**
+     * [docJson] 的 UTF-8 位元組數，寫入時算一次。
+     *
+     * 不能用 `docJson.length` 當作位元組數：那是 UTF-16 字元數，中文內容的 UTF-8
+     * 可達三倍，記憶體上限與 _bulk 上限都會被突破到預期的三倍。
+     */
+    val byteSize: Int
 )
 
 /** 要送往 ES 的一筆（uploader 取用）。 */
 data class Pending(
     val seq: Long,
     val docId: String,
-    val docJson: String
+    val docJson: String,
+    /** [docJson] 的 UTF-8 位元組數。 */
+    val byteSize: Int
 )
 
 /**

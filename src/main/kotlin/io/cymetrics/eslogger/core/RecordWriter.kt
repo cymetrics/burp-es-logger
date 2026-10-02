@@ -4,6 +4,7 @@ import burp.api.montoya.logging.Logging
 import io.cymetrics.eslogger.config.Config
 import io.cymetrics.eslogger.integrity.Hashing
 import io.cymetrics.eslogger.model.*
+import io.cymetrics.eslogger.storage.ChainTipStore
 import io.cymetrics.eslogger.storage.NewRecord
 import io.cymetrics.eslogger.storage.Pending
 import io.cymetrics.eslogger.storage.RecordSpool
@@ -37,6 +38,8 @@ class RecordWriter(
     private val store: RecordSpool,
     private val logging: Logging
 ) {
+    /** 鏈尾的權威來源。Config 依目標 index 分開保存，所以換案子等於換一條鏈。 */
+    private val chainTip: ChainTipStore = config
     private val queue: BlockingQueue<CaptureEvent> = ArrayBlockingQueue(QUEUE_CAPACITY)
     private val memoryBudget = Semaphore(MAX_QUEUE_BYTES)
 
@@ -45,8 +48,23 @@ class RecordWriter(
     private val hostName: String = try { InetAddress.getLocalHost().hostName } catch (_: Exception) { "unknown" }
 
     // hash chain 狀態：只有 writer thread 碰。
-    private var curSeq: Long = store.lastSeq
-    private var curHash: String = store.lastHash
+    //
+    // 取「持久化的鏈尾」與「spool 裡既有紀錄」兩者中較新的那個。落地模式下 spool 可能
+    // 比偏好設定更新（例如偏好設定還沒被 Burp 寫回磁碟就當機），反過來則發生在寫入
+    // 持續失敗時 —— 那些 seq 已經被用掉了，不能重新發號。
+    private var curSeq: Long
+    private var curHash: String
+
+    init {
+        val (tipSeq, tipHash) = chainTip.loadChainTip()
+        if (store.lastSeq >= tipSeq) {
+            curSeq = store.lastSeq
+            curHash = store.lastHash
+        } else {
+            curSeq = tipSeq
+            curHash = tipHash
+        }
+    }
 
     /** 累積到一定量或佇列排空才寫進 SQLite，減少 commit 次數。 */
     private val writeBuffer = ArrayList<NewRecord>(MAX_WRITE_BATCH)
@@ -344,16 +362,22 @@ class RecordWriter(
         integrity.addProperty("record_sha256", recordHash)
         doc.add("integrity", integrity)
 
-        writeBuffer.add(NewRecord(seq, docId, recordHash, doc.toString()))
+        val json = doc.toString()
+        writeBuffer.add(NewRecord(seq, docId, recordHash, json, json.toByteArray(Charsets.UTF_8).size))
         curSeq = seq
         curHash = recordHash
 
         if (writeBuffer.size >= MAX_WRITE_BATCH) flushWrites()
+        capWriteBuffer()
     }
 
     /** 寫入失敗時保留 buffer，下一輪重試；清空只在成功之後。 */
     private fun flushWrites() {
         if (writeBuffer.isEmpty()) return
+        // 先推進鏈尾再寫入。順序反過來的話，寫入持續失敗（磁碟滿、DB 被鎖）之後重載，
+        // 會從舊的鏈尾重新發出同一批 seq —— 同一個 seq 帶著不同內容出現兩次，
+        // 驗證時與遭人竄改無法區分。寧可留缺號，不可重號。
+        chainTip.saveChainTip(curSeq, curHash)
         store.insertAll(writeBuffer)
         writeBuffer.clear()
         reportDroppedRecords()
@@ -380,6 +404,28 @@ class RecordWriter(
                 "($dropped total). Enable the SQLite spool to stop losing records."
         )
     }
+
+    /**
+     * 寫入持續失敗時 buffer 會一直長大（記憶體配額在 consume 的 finally 已經放掉了，
+     * 沒有背壓可用），最後吃光 Burp 的 heap。超過上限就丟最舊的，並且講出來。
+     */
+    private fun capWriteBuffer() {
+        if (writeBuffer.size <= MAX_BUFFERED_RECORDS) return
+        val overflow = writeBuffer.size - MAX_BUFFERED_RECORDS
+        repeat(overflow) { writeBuffer.removeAt(0) }
+        bufferOverflowDropped += overflow
+        logging.logToError(
+            "[es-logger] the local spool keeps rejecting writes; dropped $overflow buffered record(s) " +
+                "($bufferOverflowDropped total) to protect Burp's heap"
+        )
+        logging.raiseCriticalEvent(
+            "ES Logger: dropped $overflow record(s) — the local spool is failing to accept writes"
+        )
+    }
+
+    /** 因為 buffer 滿而丟掉的筆數。 */
+    @Volatile var bufferOverflowDropped: Long = 0
+        private set
 
     private fun contentType(headText: String): String =
         CONTENT_TYPE_RE.find(headText)?.groupValues?.get(1)?.trim()?.lowercase() ?: ""
@@ -492,6 +538,8 @@ class RecordWriter(
         const val QUEUE_CAPACITY = 20_000
         /** 一個 SQLite 交易最多累積幾筆；佇列一排空就會提前 flush。 */
         const val MAX_WRITE_BATCH = 128
+        /** 本地儲存持續失敗時，buffer 最多累積幾筆。 */
+        const val MAX_BUFFERED_RECORDS = MAX_WRITE_BATCH * 10
         /** 丟棄通報的最短間隔，避免積壓時洗版 Event log。 */
         const val DROP_REPORT_INTERVAL_MS = 30_000L
 

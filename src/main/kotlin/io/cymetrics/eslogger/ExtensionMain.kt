@@ -11,6 +11,7 @@ import io.cymetrics.eslogger.storage.RecordSpool
 import io.cymetrics.eslogger.storage.SqliteStore
 import io.cymetrics.eslogger.ui.SettingsPanel
 import io.cymetrics.eslogger.upload.ElasticUploader
+import javax.swing.SwingUtilities
 
 class ExtensionMain : BurpExtension {
 
@@ -25,7 +26,7 @@ class ExtensionMain : BurpExtension {
 
         val config = Config(api.persistence().preferences())
         val store: RecordSpool =
-            if (config.persistLocally) SqliteStore(config.dbPath) else MemorySpool(config)
+            if (config.persistLocally) SqliteStore(config.dbPath) else MemorySpool()
         val writer = RecordWriter(config, store, log)
         val uploader = ElasticUploader(config, store, log)
 
@@ -45,9 +46,14 @@ class ExtensionMain : BurpExtension {
         }
 
         // 設定 / 狀態分頁
-        val panel = SettingsPanel(config, store, uploader, writer)
-        // 讓面板跟著 Burp 的淺色 / 深色佈景走，否則自訂元件在深色模式下會變成黑底黑字。
-        api.userInterface().applyThemeToComponent(panel)
+        // Swing 元件必須在 EDT 上建構。這裡跑在 Burp 的擴充載入執行緒上，直接 new 出來
+        // 會在 add/revalidate/repaint 時與 EDT 競爭，症狀是分頁偶爾空白或只畫一半。
+        lateinit var panel: SettingsPanel
+        SwingUtilities.invokeAndWait {
+            panel = SettingsPanel(config, store, uploader, writer)
+            // 讓面板跟著 Burp 的淺色 / 深色佈景走，否則自訂元件在深色模式下會變成黑底黑字。
+            api.userInterface().applyThemeToComponent(panel)
+        }
         api.userInterface().registerSuiteTab("ES Logger", panel)
 
         // 關閉 / 重載時 flush
@@ -71,6 +77,8 @@ class ExtensionMain : BurpExtension {
                 )
             }
             store.close()
+            // 停掉面板的 5 秒計時器：不停的話它會繼續觸發，並且讓面板連同 API key 無法回收
+            SwingUtilities.invokeLater { panel.dispose() }
         }
 
         val spool = if (config.persistLocally) "SQLite at ${config.dbPath}" else "in-memory (nothing written to disk)"

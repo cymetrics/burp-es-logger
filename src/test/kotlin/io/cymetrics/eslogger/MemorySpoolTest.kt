@@ -1,7 +1,6 @@
 package io.cymetrics.eslogger
 
 import io.cymetrics.eslogger.integrity.Hashing
-import io.cymetrics.eslogger.storage.ChainTipStore
 import io.cymetrics.eslogger.storage.MemorySpool
 import io.cymetrics.eslogger.storage.NewRecord
 import kotlin.test.Test
@@ -14,21 +13,12 @@ import kotlin.test.assertTrue
  */
 class MemorySpoolTest {
 
-    private class FakeChainTip(var seq: Long = 0, var hash: String = Hashing.GENESIS) : ChainTipStore {
-        override fun loadChainTip(): Pair<Long, String> = seq to hash
-        override fun saveChainTip(seq: Long, hash: String) {
-            this.seq = seq
-            this.hash = hash
-        }
-    }
-
     private fun record(seq: Long, payload: String = "x") =
-        NewRecord(seq, "doc-$seq", "hash-$seq", payload)
+        NewRecord(seq, "doc-$seq", "hash-$seq", payload, payload.toByteArray(Charsets.UTF_8).size)
 
     @Test
     fun `inserting advances the chain tip and the pending count`() {
-        val tip = FakeChainTip()
-        val spool = MemorySpool(tip)
+        val spool = MemorySpool()
 
         spool.insertAll(listOf(record(1), record(2)))
 
@@ -38,21 +28,8 @@ class MemorySpoolTest {
     }
 
     @Test
-    fun `the chain tip is persisted so a reload continues the sequence`() {
-        // 沒有這個行為，重載 extension 後 seq 會從 1 重來，
-        // 同一個 index 裡就會出現重複的 seq，驗證時無法分辨順序
-        val tip = FakeChainTip()
-        MemorySpool(tip).insertAll(listOf(record(7)))
-
-        val afterReload = MemorySpool(tip)
-
-        assertEquals(7, afterReload.lastSeq)
-        assertEquals("hash-7", afterReload.lastHash)
-    }
-
-    @Test
     fun `exceeding the budget drops the oldest records and counts them`() {
-        val spool = MemorySpool(FakeChainTip(), maxBytes = 30)
+        val spool = MemorySpool(maxBytes = 30)
 
         spool.insertAll(listOf(record(1, "a".repeat(20)), record(2, "b".repeat(20))))
 
@@ -62,8 +39,21 @@ class MemorySpoolTest {
     }
 
     @Test
+    fun `the budget counts UTF-8 bytes, not UTF-16 characters`() {
+        // 中文 JSON 的 UTF-8 長度是 String.length 的三倍。若用字元數當位元組數，
+        // 32 MB 的上限實際會吃到約 96 MB —— 純記憶體模式的有界記憶體承諾就破了。
+        val chinese = "測".repeat(10)          // 10 chars, 30 bytes
+        val spool = MemorySpool(maxBytes = 40)
+
+        spool.insertAll(listOf(record(1, chinese), record(2, chinese)))
+
+        assertEquals(1, spool.pendingCount, "two 30-byte records must not both fit in a 40-byte budget")
+        assertEquals(30, spool.usageBytes())
+    }
+
+    @Test
     fun `purging removes only the confirmed records and frees their bytes`() {
-        val spool = MemorySpool(FakeChainTip())
+        val spool = MemorySpool()
         spool.insertAll(listOf(record(1), record(2), record(3)))
         val before = spool.usageBytes()
 
@@ -77,7 +67,7 @@ class MemorySpoolTest {
 
     @Test
     fun `purging a sequence that is not held changes nothing`() {
-        val spool = MemorySpool(FakeChainTip())
+        val spool = MemorySpool()
         spool.insertAll(listOf(record(1)))
 
         assertEquals(0, spool.purge(listOf(99L)))
@@ -86,7 +76,7 @@ class MemorySpoolTest {
 
     @Test
     fun `a batch is limited and ordered by sequence`() {
-        val spool = MemorySpool(FakeChainTip())
+        val spool = MemorySpool()
         spool.insertAll((1L..5L).map { record(it) })
 
         assertEquals(listOf(1L, 2L, 3L), spool.pendingBatch(3).map { it.seq })

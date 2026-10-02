@@ -95,7 +95,8 @@ class Strings(
     private val tplTargetIndex: String,
     private val tplBodyHint: String,
     private val tplDropped: String,
-    private val tplRejected: String
+    private val tplRejected: String,
+    private val tplClamped: String
 ) {
     fun loaded(index: String) = tplLoaded.format(index)
     fun saved(index: String) = tplSaved.format(index)
@@ -111,6 +112,7 @@ class Strings(
     fun bodyHint(mb: Double) = tplBodyHint.format(mb)
     fun dropped(n: Long) = tplDropped.format(n)
     fun rejected(n: Long) = tplRejected.format(n)
+    fun clampedToRange(index: String) = tplClamped.format(index)
 
     companion object {
         fun of(lang: Lang): Strings = if (lang == Lang.EN) EN else ZH
@@ -181,7 +183,8 @@ class Strings(
             tplTargetIndex = "目標 index：%s",
             tplBodyHint = "約 %.1f MB。超出部分僅保留截斷片段，並記錄完整長度與雜湊。",
             tplDropped = "　(丟棄 %,d)",
-            tplRejected = "　(遭拒 %,d)"
+            tplRejected = "　(遭拒 %,d)",
+            tplClamped = "已儲存（部分數值超出允許範圍，已自動調整），目標 index：%s"
         )
 
         private val EN = Strings(
@@ -250,7 +253,8 @@ class Strings(
             tplTargetIndex = "Target index: %s",
             tplBodyHint = "Approximately %.1f MB. Larger bodies keep a truncated slice plus the full length and hash.",
             tplDropped = "　(dropped %,d)",
-            tplRejected = "　(rejected %,d)"
+            tplRejected = "　(rejected %,d)",
+            tplClamped = "Saved — some values were outside the allowed range and were adjusted. Target index: %s"
         )
     }
 }

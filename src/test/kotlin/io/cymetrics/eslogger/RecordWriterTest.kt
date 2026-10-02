@@ -119,14 +119,13 @@ class RecordWriterTest {
     @Test
     fun `seq is contiguous and continues across a reload`() {
         val prefs = FakePreferences()
-        val tip = Config(prefs)
-        val first = RecordingSpool(tip)
+        val first = RecordingSpool()
         RecordWriter(config(prefs), first, FakeLogging()).let { w ->
             w.start(); repeat(2) { exchange(w, it, "https://target/a$it") }; w.stop()
         }
 
         // 模擬重載：新的 spool，但鏈尾來自同一個偏好設定
-        val second = RecordingSpool(Config(prefs))
+        val second = RecordingSpool()
         RecordWriter(config(prefs), second, FakeLogging()).let { w ->
             w.start(); exchange(w, 99, "https://target/b"); w.stop()
         }

@@ -12,7 +12,10 @@ import kotlin.test.assertTrue
  */
 class BulkResponseTest {
 
-    private fun rows(n: Int) = (1..n).map { Pending(it.toLong(), "doc-$it", """{"seq":$it}""") }
+    private fun rows(n: Int) = (1..n).map {
+        val json = """{"seq":$it}"""
+        Pending(it.toLong(), "doc-$it", json, json.toByteArray(Charsets.UTF_8).size)
+    }
 
     @Test
     fun `created documents are accepted`() {

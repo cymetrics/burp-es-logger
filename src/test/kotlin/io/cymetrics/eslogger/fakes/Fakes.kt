@@ -69,7 +69,7 @@ class FakeLogging : Logging {
 }
 
 /** 記下所有寫入的 outbox，不丟棄任何東西，讓測試能檢查整條鏈。 */
-class RecordingSpool(private val tipStore: io.cymetrics.eslogger.storage.ChainTipStore? = null) : RecordSpool {
+class RecordingSpool : RecordSpool {
     val written = ArrayList<NewRecord>()
 
     override var lastSeq: Long = 0
@@ -80,25 +80,17 @@ class RecordingSpool(private val tipStore: io.cymetrics.eslogger.storage.ChainTi
     override val droppedCount: Long get() = 0
     override val kind: SpoolKind get() = SpoolKind.MEMORY
 
-    init {
-        tipStore?.loadChainTip()?.let { (seq, hash) ->
-            lastSeq = seq
-            lastHash = hash
-        }
-    }
-
-    override fun usageBytes(): Long = written.sumOf { it.docJson.length.toLong() }
+    override fun usageBytes(): Long = written.sumOf { it.byteSize.toLong() }
 
     override fun insertAll(records: List<NewRecord>) {
         if (records.isEmpty()) return
         written += records
         lastSeq = records.last().seq
         lastHash = records.last().recordHash
-        tipStore?.saveChainTip(lastSeq, lastHash)
     }
 
     override fun pendingBatch(limit: Int): List<Pending> =
-        written.take(limit).map { Pending(it.seq, it.docId, it.docJson) }
+        written.take(limit).map { Pending(it.seq, it.docId, it.docJson, it.byteSize) }
 
     override fun purge(seqs: Collection<Long>): Int {
         val before = written.size

@@ -57,16 +57,22 @@ class Config(private val prefs: Preferences) : ChainTipStore {
     @Volatile var dbPath: String = get("storage.dbPath", defaultDbPath())
 
     /**
-     * 鏈尾跟著 Burp 偏好設定走，所以純記憶體模式重載後 seq 仍會接續，
-     * 不會在同一個 index 裡產生重複的 seq。
+     * 鏈尾跟著 Burp 偏好設定走，所以純記憶體模式重載後 seq 仍會接續。
+     *
+     * **依目標 index 分開存。** Burp 的偏好設定是使用者層級、跨專案共用的，但 index 是
+     * 每個案子一個。若共用同一個鏈尾，換個 Project ID 之後新 index 的第一筆會宣稱
+     * seq 1001、prev_hash 指向一筆只存在於另一個 index 的紀錄 —— 驗證時看起來就是
+     * 「開頭缺了一千筆」，而那正是這條鏈要用來偵測的徵狀。
      */
     override fun loadChainTip(): Pair<Long, String> =
-        (get("chain.seq", "0").toLongOrNull() ?: 0L) to get("chain.hash", Hashing.GENESIS)
+        (get(chainKey("seq"), "0").toLongOrNull() ?: 0L) to get(chainKey("hash"), Hashing.GENESIS)
 
     override fun saveChainTip(seq: Long, hash: String) {
-        set("chain.seq", seq.toString())
-        set("chain.hash", hash)
+        set(chainKey("seq"), seq.toString())
+        set(chainKey("hash"), hash)
     }
+
+    private fun chainKey(suffix: String) = "chain.${indexName()}.$suffix"
 
     fun indexName(): String {
         val p = projectId.ifBlank { "default" }
