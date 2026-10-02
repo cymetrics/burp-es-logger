@@ -1,12 +1,19 @@
 version: 2
 updates:
-  # 只收 minor / patch。大版本（Kotlin plugin、action 主版號）會改行為或相容性，
-  # 自動開的 PR 一律 CI 失敗，手動評估比較省事。
+  # 把所有升級包成單一 PR。預設是一個相依性一個 PR，這種規模的專案一次就會開五個，
+  # 而且彼此之間還會互相 rebase —— 雜訊遠大於價值。
+  #
+  # 大版本（Kotlin plugin、action 主版號）一律忽略：它們會改行為或相容性，
+  # 自動開的 PR 只會 CI 失敗，手動評估比較省事。
   - package-ecosystem: gradle
     directory: /
     schedule:
       interval: monthly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
+    groups:
+      gradle-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
@@ -15,6 +22,11 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
