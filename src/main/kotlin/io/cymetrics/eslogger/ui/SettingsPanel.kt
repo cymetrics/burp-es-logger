@@ -500,7 +500,11 @@ class SettingsPanel(
      * 唯一碰磁碟的是落地模式下的檔案大小，那是 File.length()。
      */
     private fun refreshStats() {
-        statUploaded.set("%,d".format(uploader.uploadedTotal))
+        statUploaded.set(
+            "%,d".format(uploader.uploadedTotal) +
+                // 被 ES 永久拒絕的筆數要一直看得見，不能只靠捲過去的那行 log
+                if (uploader.rejectedTotal > 0) s.rejected(uploader.rejectedTotal) else ""
+        )
         statPending.set(
             "%,d".format(store.pendingCount) +
                 if (store.droppedCount > 0) s.dropped(store.droppedCount) else ""

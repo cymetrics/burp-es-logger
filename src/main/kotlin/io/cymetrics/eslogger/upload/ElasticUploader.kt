@@ -47,6 +47,16 @@ class ElasticUploader(
     @Volatile var uploadedTotal: Long = 0
         private set
 
+    /** 本 session 因為 ES 永久拒絕而放棄的筆數。這些 seq 會在 index 裡缺號。 */
+    @Volatile var rejectedTotal: Long = 0
+        private set
+
+    /** 每筆被拒絕的次數。uploader thread 與卸載執行緒都會碰，所以用並行的 map。 */
+    private val rejectAttempts = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+
+    /** 整批被拒時暫時縮小的批次量，用來二分逼近出問題的那一筆；成功後歸零。 */
+    @Volatile private var batchLimitOverride = 0
+
     fun start() {
         running = true
         thread = Thread({ loop() }, "es-logger-uploader").apply { isDaemon = true; start() }
@@ -106,7 +116,9 @@ class ElasticUploader(
      * `uploadIntervalSeconds` 只是閒置時的輪詢週期，不是吞吐上限。
      */
     fun flushOnce(): Boolean {
-        val pending = store.pendingBatch(config.uploadBatchSize)
+        val limit = if (batchLimitOverride > 0) minOf(batchLimitOverride, config.uploadBatchSize)
+        else config.uploadBatchSize
+        val pending = store.pendingBatch(limit)
         if (pending.isEmpty()) return false
 
         // 除了筆數，還要卡位元組：單筆 body 上限預設 2 MB，500 筆湊起來可以是數百 MB，
@@ -142,14 +154,41 @@ class ElasticUploader(
 
         val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
         if (resp.statusCode() !in 200..299) {
-            throw RuntimeException(
-                "bulk HTTP ${resp.statusCode()} (${batch.size} docs / ${bytes / 1024} KB): ${resp.body().take(300)}"
-            )
+            val detail = "HTTP ${resp.statusCode()} (${batch.size} docs / ${bytes / 1024} KB): " +
+                resp.body().take(300)
+            when (FailurePolicy.classifyHttp(resp.statusCode(), batch.size)) {
+                FailurePolicy.BatchOutcome.RETRY_LATER -> throw RuntimeException(detail)
+
+                FailurePolicy.BatchOutcome.SPLIT_BATCH -> {
+                    batchLimitOverride = batch.size / 2
+                    logging.logToError(
+                        "[es-logger] Elasticsearch rejected the whole batch — retrying with " +
+                            "$batchLimitOverride document(s) to isolate the offending record. $detail"
+                    )
+                    throw RuntimeException(detail)
+                }
+
+                FailurePolicy.BatchOutcome.DROP_BATCH -> {
+                    dropPermanently(batch, detail)
+                    batchLimitOverride = 0
+                    return true
+                }
+            }
         }
+        batchLimitOverride = 0
 
         val outcome = BulkResponse.parse(resp.body(), batch)
+        outcome.accepted.forEach { rejectAttempts.remove(it.seq) }
         outcome.rejected.forEach { (row, reason) ->
-            logging.logToError("[es-logger] document ${row.docId} (seq ${row.seq}) rejected: $reason")
+            val attempts = rejectAttempts.merge(row.seq, 1, Int::plus) ?: 1
+            if (FailurePolicy.shouldDropDocument(attempts)) {
+                dropPermanently(listOf(row), "rejected $attempts times — $reason")
+            } else {
+                logging.logToError(
+                    "[es-logger] document seq ${row.seq} rejected (attempt $attempts of " +
+                        "${FailurePolicy.MAX_DOC_ATTEMPTS}): $reason"
+                )
+            }
         }
         val succeeded = outcome.accepted
         if (succeeded.isNotEmpty()) {
@@ -176,6 +215,26 @@ class ElasticUploader(
         const val MAX_BULK_BYTES = 8L * 1024 * 1024
         /** 每筆多出來的 action 行（index 名 + _id）概估。 */
         const val BULK_ACTION_OVERHEAD = 120L
+    }
+
+    /**
+     * 放棄這幾筆：從本地刪掉，讓佇列能往前走。
+     *
+     * 這是整個擴充唯一會「主動丟掉紀錄」的地方，所以講得非常大聲 —— Extensions log
+     * 寫明是哪幾個 seq、為什麼，UI 的狀態列也會顯示。缺號本身是刻意留下的證據，
+     * 驗證時看得出來這段不是被人刪掉的。
+     */
+    private fun dropPermanently(rows: List<Pending>, reason: String) {
+        val seqs = rows.map { it.seq }
+        store.purge(seqs)
+        seqs.forEach { rejectAttempts.remove(it) }
+        rejectedTotal += rows.size
+        lastError = "${rows.size} record(s) permanently rejected by Elasticsearch (seq ${seqs.joinToString()}) — $reason"
+        logging.logToError(
+            "[es-logger] GIVING UP on ${rows.size} record(s): seq ${seqs.joinToString()}. $reason\n" +
+                "[es-logger] These records are gone from the local spool and will never reach Elasticsearch. " +
+                "The resulting gap in seq is intentional and detectable during verification."
+        )
     }
 
     /** 測試連線的結果。文案留給 UI 處理，這裡只回報狀態與語言無關的細節。 */

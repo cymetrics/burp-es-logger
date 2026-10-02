@@ -94,7 +94,8 @@ class Strings(
     private val tplHttpOther: String,
     private val tplTargetIndex: String,
     private val tplBodyHint: String,
-    private val tplDropped: String
+    private val tplDropped: String,
+    private val tplRejected: String
 ) {
     fun loaded(index: String) = tplLoaded.format(index)
     fun saved(index: String) = tplSaved.format(index)
@@ -109,6 +110,7 @@ class Strings(
     fun targetIndex(name: String) = tplTargetIndex.format(name)
     fun bodyHint(mb: Double) = tplBodyHint.format(mb)
     fun dropped(n: Long) = tplDropped.format(n)
+    fun rejected(n: Long) = tplRejected.format(n)
 
     companion object {
         fun of(lang: Lang): Strings = if (lang == Lang.EN) EN else ZH
@@ -178,7 +180,8 @@ class Strings(
             tplHttpOther = "HTTP %d — %s",
             tplTargetIndex = "目標 index：%s",
             tplBodyHint = "約 %.1f MB。超出部分僅保留截斷片段，並記錄完整長度與雜湊。",
-            tplDropped = "　(丟棄 %,d)"
+            tplDropped = "　(丟棄 %,d)",
+            tplRejected = "　(遭拒 %,d)"
         )
 
         private val EN = Strings(
@@ -246,7 +249,8 @@ class Strings(
             tplHttpOther = "HTTP %d — %s",
             tplTargetIndex = "Target index: %s",
             tplBodyHint = "Approximately %.1f MB. Larger bodies keep a truncated slice plus the full length and hash.",
-            tplDropped = "　(dropped %,d)"
+            tplDropped = "　(dropped %,d)",
+            tplRejected = "　(rejected %,d)"
         )
     }
 }

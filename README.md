@@ -46,6 +46,13 @@ content; hashing a few MB of PNG twice per request buys little evidence and cost
 messages are marked `hashes_skipped: true` — the URL, status and timing still enter the chain.
 Turn it off if you need byte-level proof of every response.
 
+**A record Elasticsearch will never accept is eventually dropped.** Server errors, throttling and
+authentication failures are retried indefinitely — the data is fine, the server or the key is not.
+But a document Elasticsearch rejects on its own merits (a mapping conflict, say) would otherwise
+block every record behind it forever. Such a batch is halved repeatedly to isolate the offending
+record, which is then dropped after three attempts. The extension says so loudly in Burp's Extensions
+log, keeps a visible counter in the tab, and leaves the gap in `seq` as evidence.
+
 **Bodies are filtered, but their fingerprints are not.** Excluded or truncated bodies still record
 `body_len` and (unless fast mode applies) `body_sha256`, which is enough to prove a specific
 payload passed through without storing it.
@@ -164,8 +171,6 @@ the stored document was altered.
 
 - The API key is not stored in an OS keychain.
 - Binary bodies grow about 33% as base64 in Elasticsearch; the size limit and truncation bound this.
-- A batch that Elasticsearch permanently rejects (a mapping conflict, say) is retried forever and
-  blocks everything behind it. There is no poison-batch quarantine yet.
 - Text bodies are decoded as UTF-8, so invalid bytes become U+FFFD and the stored text will not match
   `body_sha256`. `raw_sha256` still covers the original bytes.
 - A hash chain detects tampering; it does not prevent it. Immutability comes from the append-only
