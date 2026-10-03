@@ -63,3 +63,27 @@ tasks.shadowJar {
 tasks.build {
     dependsOn(tasks.shadowJar)
 }
+
+/**
+ * 把設定面板畫成 docs/screenshot.png。畫的是真正的 UI 程式碼，不是示意圖，
+ * 所以 README 的截圖不會和實際畫面脫節，也不需要開 Burp 來截。
+ */
+fun Project.screenshotTask(name: String, lang: String, output: String) =
+    tasks.register<JavaExec>(name) {
+        group = "documentation"
+        description = "Render the settings panel to $output"
+        mainClass.set("io.cymetrics.eslogger.tools.RenderScreenshot")
+        classpath = sourceSets["test"].runtimeClasspath
+        args(lang, output)
+        systemProperty("java.awt.headless", "false")
+        systemProperty("apple.awt.UIElement", "true")   // 不要在 Dock 跳出圖示
+    }
+
+val renderScreenshotEn = screenshotTask("renderScreenshotEn", "en", "docs/screenshot.png")
+val renderScreenshotZh = screenshotTask("renderScreenshotZh", "zh", "docs/screenshot.zh-TW.png")
+
+tasks.register("renderScreenshot") {
+    group = "documentation"
+    description = "Render both language variants of the settings panel"
+    dependsOn(renderScreenshotEn, renderScreenshotZh)
+}

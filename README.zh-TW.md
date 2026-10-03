@@ -7,31 +7,51 @@
 讓一場測試的請求在 Burp 專案關掉很久以後仍然查得到。
 紀錄之間以雜湊串接，所以事後對儲存副本的修改會留下痕跡。
 
-**它不是一場測試的完整紀錄。** 它只看得到經過 Burp 的流量，其餘一概沒有 ——
-sqlmap、ffuf、nuclei、nmap、你自己寫的腳本，以及任何沒有導進 proxy 的流量，
-在這個 index 裡都不存在。詳見[涵蓋範圍](#涵蓋範圍)。
+**它不是一場測試的完整紀錄。** 它只看得到經過 Burp 的流量 ——
+sqlmap、ffuf、nuclei、nmap 以及任何沒有導進 proxy 的腳本都不在其中，詳見[涵蓋範圍](#涵蓋範圍)。
 
 > English: [README.md](README.md)
 
+![ES Logger 分頁](docs/screenshot.zh-TW.png)
+
+## 為什麼需要它
+
+Burp 的專案檔不適合當封存：它是單一台機器上的二進位檔、搜尋很慢，
+而且重灌之後就沒了。這個擴充把同樣的流量放進 Elasticsearch，一個案子一個 index，
+每筆都標記工具、測試者與 session —— 「上週二我用 Repeater 對這台主機送了什麼」
+就變成一句查詢，而不是一個下午。
+
 ## 做什麼
 
-- **涵蓋所有工具。** 掛在 `api.http()`，所以 Proxy、Repeater、Intruder、Scanner
+- **涵蓋 Burp 送出的一切。** 掛在 `api.http()`，所以 Proxy、Repeater、Intruder、Scanner
   以及其他 extension 的流量都收得到，不只是瀏覽器經過 proxy 的部分。
-- **用 `messageId` 配對請求與回應。** 沒等到回應的請求，逾時後仍以 `request_only` 落檔，
+- **用 `messageId` 配對請求與回應。** 沒等到回應的請求逾時後仍以 `request_only` 落檔，
   不會無聲消失。
-- **決定什麼值得保存。** body 依副檔名與 Content-Type 過濾，並有大小上限，
-  讓一場測試的 index 維持在查得動的狀態，而不是被 PNG 的位元組塞滿。
-- **一個案子一個 index。** `<前綴>-<project id>`，每筆都標記工具、測試者與 session，
-  所以「上週二我用 Repeater 對這台主機送了什麼」就是一句 Kibana 查詢。
+- **決定什麼值得保存。** body 依副檔名與 Content-Type 過濾並有大小上限，
+  讓 index 維持在查得動的狀態。被排除的 body 仍會記錄長度與雜湊。
 - **絕不重複。** `_bulk` 用 `create` 搭配自訂 `_id`，網路中斷後重送會得到 409，視為已存在。
-- **不干擾 Burp。** 擷取回呼只取位元組就交給背景執行緒；上傳走 JDK 原生 `HttpClient`，
-  不經過 Burp，所以擴充不會記錄自己的流量，API key 也不會進到 proxy history。
+- **不干擾 Burp。** 擷取回呼只取位元組就交給背景執行緒；上傳走釘死 `NO_PROXY` 的 JDK
+  `HttpClient`，所以擴充不會記錄自己的流量，API key 也不可能進到 proxy history。
+
+## 快速開始
+
+1. **下載** [Releases](https://github.com/cymetrics/burp-es-logger/releases) 的
+   `burp-es-logger.jar` 並驗證：
+   ```bash
+   shasum -a 256 -c burp-es-logger.jar.sha256
+   ```
+2. **準備 Elasticsearch** —— 照 [`elasticsearch/setup.md`](elasticsearch/setup.md) 建立 index
+   template，並產生一把只能新增、不能讀 / 改 / 刪的 API key。
+   [`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) 是同樣內容，可直接貼進 Kibana 的
+   Dev Tools。
+3. **載入擴充** —— Burp → Extensions → Add → Extension type 選 **Java** → 選那個 jar，
+   會多出 **ES Logger** 分頁。打算反覆重編就把 **Auto-reload** 打開。
+4. **填寫分頁** —— endpoint、API key、index 前綴、Tester ID、Project ID →
+   **儲存設定** → **測試連線**。那裡出現 403 是預期的且畫面會解釋；401 才是真的有問題。
 
 ## 涵蓋範圍
 
-擴充掛在 `api.http()` 上，所以 **Burp** 送出的一切都收得到：Proxy、Repeater、Intruder、
-Scanner、其他 extension。Burp 以外的一概收不到。
-
+擴充掛在 `api.http()` 上，所以 **Burp** 送出的一切都收得到，Burp 以外的一概收不到。
 多數工具可以導進 Burp 的 proxy，這樣就會進到同一份紀錄：
 
 ```bash
@@ -45,142 +65,58 @@ export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080
 不走 HTTP proxy 的東西 —— nmap、DNS、raw socket、SSH tunnel —— 無論如何都在紀錄之外。
 請把這個 index 當成「這場測試中 Burp 的那一半」，報告裡也照這樣寫，不要暗示它涵蓋全部。
 
+## 設定項目
+
+| 項目 | 預設 | 說明 |
+|---|---|---|
+| Endpoint | — | 完整網址，結尾不要斜線 |
+| API key (encoded) | — | 只需要 `burp-log-*` 的 `create_doc` 權限 |
+| Index 前綴 | `burp-log` | 實際 index 為 `<前綴>-<project id>` |
+| Tester / Project ID | — | 寫入每一筆文件；project ID 同時決定 index 名稱 |
+| 排除類型 | `js,gif,jpg,jpeg,png,ico,css,woff,woff2,ttf,svg` | 同時比對副檔名與 Content-Type |
+| body 上限 | 2 MB | 超出部分只留截斷片段 + 完整長度與雜湊 |
+| 回應逾時 | 120 秒 | 逾時後以 `request_only` 記錄 |
+| 保存 body | 開 | 關閉則只記雜湊 |
+| 記錄 WebSocket 訊息 | 開 | |
+| 極速模式 | **開** | 省掉被排除靜態資源的 body 雜湊；`raw_sha256` 一律保留 |
+| 上傳間隔 | 15 秒 | 只是閒置輪詢；有積壓會連續送 |
+| 每批筆數 | 500 | 另有單次 `_bulk` 8 MB 的上限 |
+| 啟用自動上傳 | 開 | |
+| 落地到 SQLite | **關** | 開啟＝用磁碟換取跨重啟的完整性 |
+
+設定存在 Burp 的使用者偏好設定裡，跨專案共用。切換落地模式需要重載擴充，其餘存檔即生效。
+
 ## 設計取捨
 
 這些都是刻意的決定，實際用在案子上之前請先看過。
 
 **本地暫存不是封存。** 預設完全不寫磁碟：待上傳的紀錄放在 32 MB 的記憶體佇列裡，
 Elasticsearch 一確認就刪除。Burp 關閉或積壓超過上限時，未送出的會遺失 —— 而因為 `seq`
-持續遞增，缺口是**看得見的**，不會偽裝成完整紀錄。想用磁碟換完整性，就打開
-「待上傳佇列落地到 SQLite」。
+持續遞增，缺口是**看得見的**。想用磁碟換完整性就打開 SQLite 落地。
 
 **Elasticsearch 是唯一的稽核來源。** hash chain 證明的是「現有的沒有被改過」，
-不是「沒有東西不見」。請搭配 append-only 的 API key（見
-[`elasticsearch/setup.md`](elasticsearch/setup.md)），讓測試機即使被入侵也改不了已上傳的紀錄。
-
-**極速模式只省被排除靜態資源的 body 雜湊。** 圖片、字型、CSS 是客戶自己的資源，
-本來就不會保存 body，額外那次 `body_sha256` 換不到舉證力卻實際花時間。
-`raw_sha256` 一律計算，所以整包訊息（標頭、狀態列、body 位元組）仍然可驗證，
-只是少了單獨的 body 摘要，紀錄會標記 `hashes_skipped: true`。想要每個摘要都無條件計算就關掉它。
+不是「沒有東西不見」。請搭配 append-only 的 API key，讓測試機即使被入侵也改不了已上傳的紀錄。
 
 **ES 永遠不會接受的紀錄最終會被放棄。** 伺服器錯誤、流量限制與認證失敗都會無限重試 ——
-那是伺服器或金鑰的問題，資料本身沒錯。但若是文件自身的問題（例如 mapping 衝突），
-不處理就會永遠卡住它後面的每一筆。這種批次會反覆對半切以逼近出問題的那一筆，
-該筆三次之後放棄。放棄時會在 Burp 的 Extensions log 明確寫出是哪幾個 seq 與原因，
-分頁上也有持續可見的計數，並留下 `seq` 缺號作為證據。
+那是伺服器或金鑰的問題，資料本身沒錯。但文件自身的問題（例如 mapping 衝突）不處理就會
+永遠卡住它後面的每一筆，所以這種批次會反覆對半切以逼近出問題的那一筆，該筆三次之後放棄，
+而且講得很大聲：Burp dashboard 的 critical 事件、分頁上的計數，以及 `seq` 留下的缺號。
 
-**body 會被過濾，但指紋不會。** 被排除或截斷的 body 仍會記下 `body_len`，
-以及（極速模式未套用時）`body_sha256` —— 足以證明某個特定內容曾經通過，而不必保存它。
+**極速模式只省被排除靜態資源的 body 雜湊。** 圖片、字型、CSS 是客戶自己的資源，
+本來就不會保存 body。`raw_sha256` 一律計算，所以整包訊息仍然可驗證，
+只是少了單獨的 body 摘要，紀錄會標記 `hashes_skipped: true`。
 
-## 自行編譯
+## 文件
 
-需要 JDK 17，Gradle wrapper 已附在 repo 內。
+| | |
+|---|---|
+| [架構](docs/architecture.md) | 處理流程、執行緒，以及每一道讓記憶體有界的上限 |
+| [完整性](docs/integrity.md) | 鏈的公式、怎麼驗證，以及它證明不了什麼 |
+| [查詢](docs/queries.md) | 你真的會問的那些問題對應的 Kibana 查詢 |
+| [疑難排解](docs/troubleshooting.md) | 載不進去、沒在上傳、紀錄被丟棄 |
+| [Elasticsearch 設定](elasticsearch/setup.md) | index template 與 append-only 金鑰 |
 
-```bash
-JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew shadowJar
-# → build/libs/burp-es-logger.jar
-```
-
-jar 內含 macOS、Windows、Linux（含 musl）的 SQLite 原生函式庫，同一個檔案在各平台都能用。
-
-## 安裝
-
-到 [Releases](https://github.com/cymetrics/burp-es-logger/releases) 下載最新的
-`burp-es-logger.jar`，或自行編譯（見下一節）。每個 release 的 jar 旁邊都附
-`.sha256`，載入 Burp 之前請先驗證：
-
-```bash
-shasum -a 256 -c burp-es-logger.jar.sha256
-```
-
-Burp → Extensions → Add → Extension type 選 **Java** → 選那個 jar，會多出 **ES Logger** 分頁。
-
-打算反覆重編的話，把該 extension 的 **Auto-reload** 打開，Burp 會自己換上新的 jar。
-
-## Elasticsearch 設定
-
-照 [`elasticsearch/setup.md`](elasticsearch/setup.md) 做：建立 index template，
-並產生一把只能新增、不能讀 / 改 / 刪的 API key。
-[`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) 是同樣的內容，可直接貼進
-Kibana 的 Dev Tools。
-
-接著在分頁填入 endpoint、API key、index 前綴、Tester ID、Project ID →
-**儲存設定** → **測試連線**。
-
-## 設定項目
-
-| 項目 | 預設 | 說明 |
-|---|---|---|
-| Elasticsearch Endpoint | — | 完整網址，結尾不要斜線 |
-| API Key (encoded) | — | 只需要 `burp-log-*` 的 `create_doc` 權限 |
-| Index 前綴 | `burp-log` | 實際 index 為 `<前綴>-<project id>` |
-| Tester / Project ID | — | 寫入每一筆文件；project ID 同時決定 index 名稱 |
-| 排除 body 的副檔名 | `js,gif,jpg,jpeg,png,ico,css,woff,woff2,ttf,svg` | 同時比對副檔名與 Content-Type |
-| 單筆 body 上限 | 2 MB | 超過的只留截斷片段 + 完整長度 + 完整 hash |
-| 無回應逾時 | 120 秒 | 逾時後以 `request_only` 落檔 |
-| 儲存 body | 開 | 關閉則所有 body 只留 hash |
-| 記錄 WebSocket 訊息 | 開 | |
-| 極速模式 | **開** | 被排除的靜態資源連雜湊都不算 |
-| 上傳間隔 | 15 秒 | 只是閒置輪詢；有積壓會連續送 |
-| 每批筆數 | 500 | 另有單次 `_bulk` 8 MB 的上限 |
-| 啟用自動上傳 | 開 | |
-| 落地到 SQLite | **關** | 開啟＝用磁碟換取跨重啟的完整性 |
-
-## 文件結構
-
-```jsonc
-{
-  "@timestamp": "2026-10-02T07:49:05.323Z",
-  "seq": 1234, "doc_id": "uuid", "session_id": "uuid",
-  "tester_id": "zet", "project_id": "acme2026", "capture_host": "laptop",
-  "type": "http", "tool": "Proxy",
-  "request":  { "time", "method", "url", "host", "port", "secure", "headers",
-                "body" | "body_b64", "body_stored", "body_len", "body_sha256",
-                "body_truncated", "body_skip_reason", "raw_sha256", "hashes_skipped" },
-  "response": { "time", "status", "headers", "body" | "body_b64", "...": "同 request" },
-  "integrity": { "algo": "sha256", "scheme": "...", "prev_hash": "...", "record_sha256": "..." }
-}
-```
-
-`type` 為 `http`、`http_request_only`、`http_response_only`、`websocket` 其中之一。
-
-## 完整性
-
-這是輔助特性，不是你跑這個工具的理由。每筆紀錄帶有 `raw_sha256` 與 `body_sha256`，
-以及把前一筆雜湊折進來的 `record_sha256`，所以文件之間形成一條鏈。
-
-它換到的是：儲存的文件被改、或中間某一筆被移除，鏈就驗不過。缺號也看得見，
-因為即使紀錄被丟棄，`seq` 仍然繼續遞增。
-
-它換不到的是：完整性涵蓋範圍（見[涵蓋範圍](#涵蓋範圍)），而且它本身不等於法庭證據 ——
-拿得到刪除權限的人，一樣可以截掉尾端或把整條鏈重算一遍。
-[已知限制](#已知限制)有完整說明，以及能補上這個缺口的外部錨點做法。
-
-### 驗證方式
-
-依 `seq` 排序後逐筆重算。每個欄位前置它自己的 UTF-8 位元組長度，
-因此任何欄位內容都無法偽造欄位邊界：
-
-```
-fields = [ seq, doc_id, type,
-           session_id, tester_id, project_id, capture_host,
-           request.time, response.time,
-           tool, request.method, request.url, response.status,
-           request.raw_sha256, request.body_sha256,
-           response.raw_sha256, response.body_sha256 ]
-
-material = prev_hash  ‖  對每個欄位：len(UTF-8 位元組) ‖ ":" ‖ 欄位內容
-
-record_sha256 = SHA256(material)
-```
-
-第一筆的 `prev_hash` 是 64 個 0；`prev_hash` 放在最前面是因為它固定 64 個十六進位字元，
-不會與後面的長度前綴混淆。缺少的欄位以空字串參與計算 —— 極速模式跳過的雜湊也是如此。
-WebSocket 紀錄的欄位組合略有不同，詳見 `RecordWriter.kt`。
-
-每份文件的 `integrity.scheme` 也記錄了這個公式，單看一份文件就知道該怎麼驗證。
-
-`seq` 出現缺口代表那幾筆從未送達 Elasticsearch；雜湊對不上則代表文件被改過。
+（文件本身為英文，與程式碼註解分開維護。）
 
 ## 實際用在案子之前
 
@@ -196,14 +132,24 @@ WebSocket 紀錄的欄位組合略有不同，詳見 `RecordWriter.kt`。
 - 二進位 body 以 base64 進 ES 會膨脹約 33%，已用大小上限與截斷夾住。
 - 文字 body 以 UTF-8 解碼，非法位元組會變成 U+FFFD，存下的文字因此與 `body_sha256` 不一致；
   `raw_sha256` 仍涵蓋原始位元組。
-- hash chain 偵測竄改，但不能阻止竄改。不可刪除性來自 append-only 的 API key，
-  以及你額外加上的外部存證機制。
-- **只刪尾端無法單靠 index 偵測。** 刪掉中間任何一筆都會讓鏈斷掉，但刪掉最新的 N 筆之後，
-  剩下的鏈仍然從頭驗到尾 —— 因為沒有任何地方記錄「鏈尾應該是什麼」。
-  這對你的案子重要的話，請在關鍵時點把當下的 `record_sha256` 另外存出去：
-  寫進報告、開一張單，或放到 Burp 這把金鑰寫不到的第二個 index。
-- 測試途中更改 index 前綴或 Project ID，已經擷取但還沒上傳的紀錄會被送到新的 index，
-  同一條鏈會被切到兩個 index 裡。請在開始擷取之前就設定好。
+- hash chain 偵測竄改，但不能阻止竄改。**只刪尾端無法單靠 index 偵測** ——
+  補救方式見[完整性](docs/integrity.md#what-this-does-and-does-not-prove)裡的外部錨點做法。
+- 測試途中更改 index 前綴或 Project ID，已擷取但未上傳的紀錄會被送到新的 index，
+  同一條鏈會被切成兩半。請在開始擷取之前就設定好。
+
+## 開發
+
+需要 JDK 17；Gradle 不支援 JDK 25 以上。
+
+```bash
+JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew test shadowJar
+# → build/libs/burp-es-logger.jar
+
+./gradlew renderScreenshot   # 從真實 UI 程式碼重新產生 docs/screenshot*.png
+```
+
+jar 內含 macOS、Windows、Linux（含 musl）的 SQLite 原生函式庫，同一個檔案在各平台都能用。
+CI 會驗證 Gradle wrapper 的雜湊、跑測試，並在發布前確認 Montoya 入口宣告存在。
 
 ## 授權
 
