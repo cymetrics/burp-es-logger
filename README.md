@@ -178,6 +178,13 @@ the stored document was altered.
   `body_sha256`. `raw_sha256` still covers the original bytes.
 - A hash chain detects tampering; it does not prevent it. Immutability comes from the append-only
   API key, and from whatever external notarization you add on top.
+- **Truncating the tail is not detectable from the index alone.** Deleting a record in the middle
+  breaks the links, but deleting the newest N records leaves a chain that verifies end to end,
+  because nothing records what the head should be. If that matters for your engagement, export the
+  current `record_sha256` out of band — into the report, a ticket, or a second index the Burp key
+  cannot write — at the points you care about.
+- Changing the index prefix or project ID mid-session sends records that were already captured to
+  the new index, so one chain ends up split across two indices. Set them before you start capturing.
 
 ## License
 
