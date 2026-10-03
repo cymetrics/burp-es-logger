@@ -19,9 +19,10 @@ simply absent — see [Scope](#what-this-does-not-capture).
   and other extensions are all covered — not just proxied browser traffic.
 - **Pairs requests with responses** by `messageId`. A request that never gets a response is still
   written as `request_only` once it times out, so nothing silently disappears.
-- **Hash-chains every record.** Each document carries `raw_sha256` and `body_sha256`, plus
-  `record_sha256 = SHA256(material ‖ prev_hash)`. Deleting, inserting or editing a record in the
-  middle of a run breaks the chain.
+- **Decides what is worth storing.** Bodies are filtered by file extension and Content-Type and
+  capped in size, so an engagement's index stays queryable instead of filling with PNG bytes.
+- **One index per engagement.** `<prefix>-<project id>`, with every record tagged by tool, tester
+  and session, so "what did I send to this host, with Repeater, last Tuesday" is a Kibana query.
 - **Never duplicates.** `_bulk` uses `create` with a client-generated `_id`, so a resend after a
   network failure returns 409 and is treated as already stored.
 - **Stays out of your way.** The capture callback only grabs bytes and hands them to a background
@@ -153,7 +154,22 @@ Then fill in the tab: endpoint, API key, index prefix, tester ID, project ID →
 
 `type` is one of `http`, `http_request_only`, `http_response_only`, `websocket`.
 
-## Verifying the chain
+## Integrity
+
+A secondary property, not the reason to run this. Each record carries `raw_sha256` and
+`body_sha256`, and a `record_sha256` that folds in the previous record's hash, so the documents
+form a chain.
+
+What that buys you: an edit to a stored document, or a record removed from the middle of a run,
+stops the chain verifying. Gaps are visible too, because `seq` keeps counting even when records are
+dropped.
+
+What it does not buy you: completeness (see [Scope](#what-this-does-not-capture)), and it is not
+forensic proof on its own — anyone holding a key that can delete can also truncate the tail or
+recompute the whole chain. The [Known limitations](#known-limitations) spell this out, along with
+the out-of-band anchor that closes it.
+
+### Verifying
 
 Sort by `seq` and recompute. Each field is prefixed with its own length in UTF-8 bytes, so no
 field content can forge a boundary between fields:
