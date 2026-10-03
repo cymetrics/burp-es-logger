@@ -3,11 +3,13 @@
 [![Build](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml/badge.svg)](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-把 Burp 經手的每一筆 HTTP / WebSocket 流量記錄到 Elasticsearch 的擴充，
-並以 SHA-256 hash chain 讓「刪改」留下痕跡。
+把 Burp 經手的 HTTP / WebSocket 流量鏡射到 Elasticsearch 的擴充，
+讓一場測試的請求在 Burp 專案關掉很久以後仍然查得到。
+紀錄之間以雜湊串接，所以事後對儲存副本的修改會留下痕跡。
 
-為授權滲透測試而寫 —— 「測試者當時究竟送了什麼、何時送的」這個問題，
-幾個月後仍要能回答，而且是回答給當時不在場的人。
+**它不是一場測試的完整紀錄。** 它只看得到經過 Burp 的流量，其餘一概沒有 ——
+sqlmap、ffuf、nuclei、nmap、你自己寫的腳本，以及任何沒有導進 proxy 的流量，
+在這個 index 裡都不存在。詳見[涵蓋範圍](#涵蓋範圍)。
 
 > English: [README.md](README.md)
 
@@ -22,6 +24,24 @@
 - **絕不重複。** `_bulk` 用 `create` 搭配自訂 `_id`，網路中斷後重送會得到 409，視為已存在。
 - **不干擾 Burp。** 擷取回呼只取位元組就交給背景執行緒；上傳走 JDK 原生 `HttpClient`，
   不經過 Burp，所以擴充不會記錄自己的流量，API key 也不會進到 proxy history。
+
+## 涵蓋範圍
+
+擴充掛在 `api.http()` 上，所以 **Burp** 送出的一切都收得到：Proxy、Repeater、Intruder、
+Scanner、其他 extension。Burp 以外的一概收不到。
+
+多數工具可以導進 Burp 的 proxy，這樣就會進到同一份紀錄：
+
+```bash
+sqlmap --proxy http://127.0.0.1:8080
+ffuf   -x http://127.0.0.1:8080
+nuclei -proxy http://127.0.0.1:8080
+curl   -x http://127.0.0.1:8080 -k
+export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080
+```
+
+不走 HTTP proxy 的東西 —— nmap、DNS、raw socket、SSH tunnel —— 無論如何都在紀錄之外。
+請把這個 index 當成「這場測試中 Burp 的那一半」，報告裡也照這樣寫，不要暗示它涵蓋全部。
 
 ## 設計取捨
 

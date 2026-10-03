@@ -3,11 +3,13 @@
 [![Build](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml/badge.svg)](https://github.com/cymetrics/burp-es-logger/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A Burp Suite extension that records every HTTP and WebSocket message Burp handles
-into Elasticsearch, with a SHA-256 hash chain that makes deletion or tampering detectable.
+A Burp Suite extension that mirrors the HTTP and WebSocket traffic Burp handles into
+Elasticsearch, so an engagement's requests stay searchable long after the Burp project is closed.
+Records are hash-chained, which makes later edits to the stored copy detectable.
 
-Built for authorized penetration testing, where "what did the tester actually send, and when"
-has to be answerable months later — by someone who was not in the room.
+**What it is not: a complete record of an engagement.** It sees what passes through Burp and
+nothing else. sqlmap, ffuf, nuclei, nmap, your own scripts and any traffic you did not proxy are
+simply absent — see [Scope](#what-this-does-not-capture).
 
 > 中文說明請見 [README.zh-TW.md](README.zh-TW.md)
 
@@ -25,6 +27,25 @@ has to be answerable months later — by someone who was not in the room.
 - **Stays out of your way.** The capture callback only grabs bytes and hands them to a background
   thread. Uploads use a plain JDK `HttpClient` that does not go through Burp, so the extension
   never logs its own traffic and the API key never lands in the proxy history.
+
+## What this does not capture
+
+The extension hooks `api.http()`, so everything **Burp** sends is covered: Proxy, Repeater,
+Intruder, Scanner, other extensions. Nothing outside Burp is.
+
+Most tools can be pointed at Burp's proxy, which brings them into the same log:
+
+```bash
+sqlmap --proxy http://127.0.0.1:8080
+ffuf   -x http://127.0.0.1:8080
+nuclei -proxy http://127.0.0.1:8080
+curl   -x http://127.0.0.1:8080 -k
+export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080
+```
+
+Anything that does not speak HTTP through a proxy — nmap, DNS, raw sockets, an SSH tunnel — stays
+outside the record no matter what. Treat the index as "the Burp half of the engagement", and say so
+in the report rather than implying it is the whole of it.
 
 ## Design trade-offs
 
