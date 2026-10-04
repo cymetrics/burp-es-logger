@@ -38,7 +38,7 @@ records. Enable **Spool pending records to local SQLite** to trade disk for comp
 
 ## Verification reports gaps
 
-Gaps are records that never reached the index — the extension drops the oldest when the spool fills,
+Gaps can be records that never reached the index or records removed later — the extension drops the oldest when the spool fills,
 and traffic arriving during unload never gets a `seq` at all. Both are reported while running. A gap
 is not proof of deletion, and the chain cannot tell the two apart; see
 [integrity.md](integrity.md).
@@ -51,3 +51,23 @@ fails with `IllegalArgumentException: 27` before anything is built:
 ```bash
 JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew test shadowJar
 ```
+
+## Upgrading an existing SQLite spool
+
+New SQLite tables separate each index's backlog and chain tip. Old tables did not record an index,
+so the upgrade cannot safely infer their destination from the currently selected project.
+
+If the old tip exactly matches the original index's saved Burp preferences and all pending documents
+belong to that project, the migration moves those records transactionally without changing their
+IDs, sequence numbers or payloads. Otherwise the old records remain in legacy tables and a critical
+event explains that they were preserved but not uploaded. Other projects can use their own empty
+scoped spool without touching those records.
+
+To recover, restore the original index prefix and Project ID and reload using the original Burp
+user preferences. If those preferences are missing or the old backlog spans projects, keep a backup
+of the SQLite database for manual destination recovery; do not delete it or relabel records to
+force an upload. Records from other scoped indices also remain on disk until that index is reopened.
+
+New v2 records authenticate their stored bodies and headers. Legacy records retain their historical
+limits and the verifier prints a warning; upgrading cannot establish the integrity of old payloads
+retroactively. Use `--require-v2` only when legacy records should be rejected.

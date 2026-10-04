@@ -98,8 +98,17 @@ class RecordingSpool : RecordSpool {
         lastHash = records.last().recordHash
     }
 
-    override fun pendingBatch(limit: Int): List<Pending> =
-        written.take(limit).map { Pending(it.seq, it.docId, it.docJson, it.byteSize) }
+    override fun pendingBatch(limit: Int, maxBytes: Long): List<Pending> {
+        val out = ArrayList<Pending>()
+        var bytes = 0L
+        for (row in written.take(limit)) {
+            if (out.isNotEmpty() && row.byteSize > maxBytes - bytes) break
+            out.add(Pending(row.seq, row.docId, row.docJson, row.byteSize))
+            bytes += row.byteSize
+            if (bytes >= maxBytes) break
+        }
+        return out
+    }
 
     override fun purge(seqs: Collection<Long>): Int {
         val before = written.size

@@ -29,6 +29,24 @@ import kotlin.test.assertTrue
  */
 class ChainContinuityTest {
 
+    @Test
+    fun `saving a new project does not relabel active records or overwrite its chain`() {
+        val prefs = FakePreferences()
+        val config = testConfig(prefs, project = "acme")
+        val spool = RecordingSpool()
+        val writer = RecordWriter(config, spool, FakeLogging())
+        config.projectId = "beta"
+        config.indexPrefix = "other"
+        config.save()
+        run(writer, 1)
+
+        val doc = JsonParser.parseString(spool.written.single().docJson).asJsonObject
+        assertEquals("acme", doc["project_id"].asString)
+        assertEquals("burp-log-acme", writer.targetIndex)
+        assertEquals(0L, config.loadChainTip().first)
+        assertEquals(1L, config.chainTipFor("burp-log-acme").loadChainTip().first)
+    }
+
     private fun writer(prefs: FakePreferences, project: String, spool: RecordSpool): RecordWriter {
         return RecordWriter(testConfig(prefs, project = project), spool, FakeLogging())
     }
@@ -97,7 +115,7 @@ class ChainContinuityTest {
             override val kind = SpoolKind.MEMORY
             override fun usageBytes() = 0L
             override fun insertAll(records: List<NewRecord>) = throw IllegalStateException("disk full")
-            override fun pendingBatch(limit: Int): List<Pending> = emptyList()
+            override fun pendingBatch(limit: Int, maxBytes: Long): List<Pending> = emptyList()
             override fun purge(seqs: Collection<Long>) = 0
             override fun close() {}
         }

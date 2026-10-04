@@ -28,16 +28,11 @@ import java.time.Instant
 class ElasticUploader(
     private val config: Config,
     private val store: RecordSpool,
-    private val logging: Logging
+    private val logging: Logging,
+    private val http: HttpClient = createHttpClient()
 ) {
-    private val http: HttpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(10))
-        // 明確停用 proxy。HttpClient 預設會查 JVM 全域的 ProxySelector，所以若 Burp 以
-        // -Dhttps.proxyHost 啟動（串接其他工具時很常見），帶著 API key 的 _bulk 會流經
-        // 那個 proxy —— 若那正是 Burp 自己，金鑰就進了 proxy history 與專案檔，
-        // 而且上傳流量會被這個擴充自己記錄下來，遞迴。
-        .proxy(HttpClient.Builder.NO_PROXY)
-        .build()
+    /** 目的 index 在本次載入期間固定，避免待送資料因設定變更而移到其他專案。 */
+    val targetIndex: String = config.indexName()
 
     @Volatile private var running = false
     private lateinit var thread: Thread
@@ -164,7 +159,7 @@ class ElasticUploader(
     private fun flushBatch(): Boolean {
         val limit = if (batchLimitOverride > 0) minOf(batchLimitOverride, config.uploadBatchSize)
         else config.uploadBatchSize
-        val pending = store.pendingBatch(limit)
+        val pending = store.pendingBatch(limit, bulkByteLimit)
         if (pending.isEmpty()) return false
 
         // 除了筆數，還要卡位元組：單筆 body 上限預設 2 MB，500 筆湊起來可以是數百 MB，
@@ -181,7 +176,7 @@ class ElasticUploader(
         // count 至少是 1：單筆就超標也要送，否則這筆會永遠擋住後面的佇列。
         val batch = pending.take(count)
 
-        val index = config.indexName()
+        val index = targetIndex
         val sb = StringBuilder()
         for (p in batch) {
             // 動作行：對 data-stream 以外的一般 index 可指定 _id，重送才具冪等性
@@ -237,8 +232,6 @@ class ElasticUploader(
                     }
                     dropPermanently(batch, "rejected $attempts times — $detail")
                     batchLimitOverride = 0
-        // 成功一次就讓位元組上限慢慢長回去，避免一次 413 之後永遠小批上傳
-        if (bulkByteLimit < MAX_BULK_BYTES) bulkByteLimit = (bulkByteLimit * 2).coerceAtMost(MAX_BULK_BYTES)
                     return true
                 }
             }
@@ -247,15 +240,23 @@ class ElasticUploader(
 
         val outcome = BulkResponse.parse(resp.body(), batch)
         outcome.accepted.forEach { rejectAttempts.remove(it.seq) }
-        outcome.rejected.forEach { (row, reason) ->
-            val attempts = rejectAttempts.merge(row.seq, 1, Int::plus) ?: 1
-            if (FailurePolicy.shouldDropDocument(attempts)) {
-                dropPermanently(listOf(row), "rejected $attempts times — $reason")
+        var needsRetry = false
+        outcome.rejected.forEach { (row, status, reason) ->
+            if (!FailurePolicy.isPermanentDocumentFailure(status)) {
+                // 認證、節流與伺服器錯誤不消耗文件的永久拒絕次數。
+                needsRetry = true
+                logging.logToError("[es-logger] document seq ${row.seq} will be retried (status $status): $reason")
             } else {
-                logging.logToError(
-                    "[es-logger] document seq ${row.seq} rejected (attempt $attempts of " +
-                        "${FailurePolicy.MAX_DOC_ATTEMPTS}): $reason"
-                )
+                val attempts = rejectAttempts.merge(row.seq, 1, Int::plus) ?: 1
+                if (FailurePolicy.shouldDropDocument(attempts)) {
+                    dropPermanently(listOf(row), "rejected $attempts times — $reason")
+                } else {
+                    needsRetry = true
+                    logging.logToError(
+                        "[es-logger] document seq ${row.seq} rejected (attempt $attempts of " +
+                            "${FailurePolicy.MAX_DOC_ATTEMPTS}): $reason"
+                    )
+                }
             }
         }
         val succeeded = outcome.accepted
@@ -270,15 +271,19 @@ class ElasticUploader(
         lastError = if (succeeded.size == batch.size) "" else
             "${batch.size - succeeded.size}/${batch.size} documents rejected — see the Extensions log"
 
-        if (succeeded.size < batch.size) {
-            logging.logToError(
-                "[es-logger] ${batch.size - succeeded.size} of ${batch.size} documents were rejected, retrying next round"
-            )
-        }
+        // 部分成功先安全清除已確認項目，再讓背景 loop 進入同一套 exponential backoff。
+        if (needsRetry) throw IllegalStateException(lastError)
+        if (bulkByteLimit < MAX_BULK_BYTES) bulkByteLimit = (bulkByteLimit * 2).coerceAtMost(MAX_BULK_BYTES)
         return true
     }
 
     private companion object {
+        fun createHttpClient(): HttpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            // 避免遞迴擷取及 API key 經過 Burp 的 proxy history。
+            .proxy(HttpClient.Builder.NO_PROXY)
+            .build()
+
         /** 單一 _bulk 請求的位元組上限。ES 預設 http.max_content_length 是 100 MB，留足餘裕。 */
         const val MAX_BULK_BYTES = 8L * 1024 * 1024
         /** 每筆多出來的 action 行（index 名 + _id）概估。 */

@@ -1,0 +1,1 @@
+{"seq":9223372036854775807,"unicode":"中文 😀 é é","\ue000":"bmp","\ud83d\ude00":"supplementary","lone":"\ud800","numbers":[1.2300e2,-0.00,0.000001,1e20],"nested":[null,true,false,{"integrity":"included","empty":""}],"integrity":{"ignored":true}}

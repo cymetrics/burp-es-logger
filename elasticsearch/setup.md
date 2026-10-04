@@ -68,12 +68,13 @@ curl -s -X PUT "$ES/burp-log-<project_id>/_mapping" \
   -d '{"properties":{
         "request":{"properties":{"hashes_skipped":{"type":"boolean"}}},
         "response":{"properties":{"hashes_skipped":{"type":"boolean"}}},
-        "websocket":{"properties":{"hashes_skipped":{"type":"boolean"}}}
+        "websocket":{"properties":{"hashes_skipped":{"type":"boolean"}}},
+        "integrity":{"properties":{"payload_sha256":{"type":"keyword"}}}
       }}'
 ```
 
-沒補的話，`hashes_skipped` 仍然會存在文件的 `_source` 裡（mapping 是 `dynamic: false`，
-不會報錯），但**無法用來搜尋或聚合** —— 也就是查不出「哪些訊息沒有雜湊」。
+沒補的話，新欄位仍然會存在文件的 `_source` 裡（mapping 是 `dynamic: false`，
+不會報錯），驗證器也讀得到，但**無法用來搜尋或聚合**。
 
 ## 3. 權限說明
 
@@ -91,21 +92,28 @@ curl -s -X PUT "$ES/burp-log-<project_id>/_mapping" \
 
 ## 5. 驗證 hash chain（結案時）
 
-每筆文件有 `integrity.prev_hash` 與 `integrity.record_sha256`。
-依 `seq` 排序後，逐筆用下列公式重算並比對即可證明沒有被刪改：
+新紀錄使用 `integrity.scheme: "burp-es-logger-v2"`。除了前一筆 hash，
+也涵蓋整份儲存內容，包含 headers、body、截斷標記、時間與識別欄位：
 
 ```
-fields = [ seq, doc_id, type,
-           session_id, tester_id, project_id, capture_host,
-           request.time, response.time,
-           tool, request.method, request.url, response.status,
-           request.raw_sha256, request.body_sha256,
-           response.raw_sha256, response.body_sha256 ]
+payload_sha256 = SHA256(canonical(文件去除最上層 integrity))
+fields = [ "burp-es-logger-v2", payload_sha256 ]
 material = prev_hash ‖ 對每個欄位：len(UTF-8 位元組) ‖ ":" ‖ 欄位內容
 record_sha256 = SHA256(material)
 ```
 
-第一筆的 `prev_hash` 為 64 個 0。長度前綴確保欄位邊界無法被內容偽造。
-（WebSocket 記錄的 material 欄位組合略有不同，詳見 RecordWriter.kt。）
-鏈的驗證在 ES 端做：依 `seq` 排序後逐筆重算，`seq` 不連續就代表有缺漏。
-本地 SQLite 只是 outbox（上傳成功即刪），不保留副本。
+第一筆的 `prev_hash` 為 64 個 0；升級後也能接續原有 v1 鏈。HTTP 與 WebSocket
+共用 v2 格式。完整 canonical 規格及 v1 相容性見 [Integrity](../docs/integrity.md)。
+
+先停止擷取並確認上傳完成，再用可讀取 index 的 key 驗證：
+
+```bash
+ES=https://your-endpoint API_KEY=... python3 tools/verify_chain.py burp-log-demo --strict
+```
+
+`--strict` 會在序號缺漏時回傳失敗；缺漏無法區分「未上傳」與「之後被刪除」。
+舊 v1 紀錄的 body / headers 沒有受到鏈的保護，驗證器會明確警告；加上
+`--require-v2` 可拒絕這類紀錄，升級無法追溯修復舊資料的完整性保證。
+每個 index 限單一 writer 鏈；不同 Burp 安裝請使用不同 project / index。
+尾端截斷及整鏈重算仍需比對另外保存的可信鏈尾才能發現。
+本地 SQLite 只是 outbox（上傳成功即刪），不保留歷史副本。

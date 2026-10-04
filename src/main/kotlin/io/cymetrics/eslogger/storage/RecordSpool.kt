@@ -67,7 +67,11 @@ interface RecordSpool {
 
     fun insertAll(records: List<NewRecord>)
 
-    fun pendingBatch(limit: Int): List<Pending>
+    /**
+     * 按 seq 讀取，並在儲存層限制 JSON 的 UTF-8 位元組總量，避免先把整批大文件載入 heap。
+     * 第一筆即使超過 [maxBytes] 也會回傳，讓呼叫端能處理過大的紀錄。
+     */
+    fun pendingBatch(limit: Int, maxBytes: Long = Long.MAX_VALUE): List<Pending>
 
     /** 刪除已確認進 ES 的紀錄，回傳實際刪掉的筆數。 */
     fun purge(seqs: Collection<Long>): Int

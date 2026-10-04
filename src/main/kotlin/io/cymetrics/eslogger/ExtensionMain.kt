@@ -26,7 +26,17 @@ class ExtensionMain : BurpExtension {
 
         val config = Config(api.persistence().preferences())
         val store: RecordSpool =
-            if (config.persistLocally) SqliteStore(config.dbPath) else MemorySpool()
+            if (config.persistLocally) {
+                SqliteStore(config.dbPath, config.indexName(), config.loadChainTip(), config.projectId)
+            } else MemorySpool()
+        if (store is SqliteStore && store.legacyPendingCount > 0) {
+            log.logToError(
+                "[es-logger] ${store.legacyPendingCount} legacy record(s) are preserved but not uploaded: " +
+                    "their destination cannot be confirmed. Reload with the original index/project and " +
+                    "its saved chain preferences to recover them; keep the SQLite file for recovery."
+            )
+            log.raiseCriticalEvent("ES Logger: legacy SQLite records need their original project before upload")
+        }
         val writer = RecordWriter(config, store, log)
         val uploader = ElasticUploader(config, store, log)
 
@@ -74,7 +84,7 @@ class ExtensionMain : BurpExtension {
             if (stranded > 0) {
                 log.logToError(
                     "[es-logger] $stranded record(s) were still pending at unload" +
-                        if (config.persistLocally) " and remain in the local spool"
+                        if (store is SqliteStore) " and remain in the local spool"
                         else " and were lost — the gap is visible as a jump in seq"
                 )
             }

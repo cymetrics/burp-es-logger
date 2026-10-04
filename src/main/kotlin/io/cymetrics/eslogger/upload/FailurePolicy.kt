@@ -45,5 +45,8 @@ object FailurePolicy {
     /** 唯一會導向丟棄的狀態碼：ES 認為這份文件本身不合法。 */
     private val DATA_FAULT_STATUSES = setOf(400, 422)
 
+    /** Bulk 的 HTTP 200 也可能包含暫時失敗；只有文件錯誤才消耗丟棄次數。 */
+    fun isPermanentDocumentFailure(status: Int): Boolean = status in DATA_FAULT_STATUSES
+
     fun shouldDropDocument(attempts: Int): Boolean = attempts >= MAX_DOC_ATTEMPTS
 }

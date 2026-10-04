@@ -5,7 +5,8 @@
 
 A Burp Suite extension that mirrors the HTTP and WebSocket traffic Burp handles into
 Elasticsearch, so an engagement's requests stay searchable long after the Burp project is closed.
-Records are hash-chained, which makes later edits to the stored copy detectable.
+New records use a v2 hash chain covering the stored body, headers and metadata.
+Legacy records remain verifiable with their original, narrower protection; see [Integrity](docs/integrity.md).
 
 **What it is not: a complete record of an engagement.** It sees what passes through Burp and
 nothing else — sqlmap, ffuf, nuclei, nmap and any unproxied script are simply absent. See
@@ -51,7 +52,7 @@ host with Repeater last Tuesday" is a query rather than an afternoon.
 3. **Load the extension** — Burp → Extensions → Add → Extension type **Java** → select the jar. An
    **ES Logger** tab appears. Turn on **Auto-reload** if you plan to rebuild it.
 4. **Fill in the tab** — endpoint, API key, index prefix, tester ID, project ID → **Save settings**
-   → **Test connection**. A 403 there is expected and explained; a 401 is not.
+   → reload the extension if the project/index changed → **Test connection**. A 403 there is expected and explained; a 401 is not.
 
 ## Scope
 
@@ -90,7 +91,8 @@ in the report rather than implying it is the whole of it.
 | Spool to SQLite | **off** | On = survive restarts at the cost of disk |
 
 Settings live in Burp's user preferences, so they follow you across projects. Changing the spool
-mode needs an extension reload; everything else applies on save.
+mode, index prefix or project ID needs an extension reload. Until then, capture and uploads keep
+using the original project/index. Other settings apply on save (WebSocket registration requires a reload).
 
 ## Design trade-offs
 
@@ -145,12 +147,15 @@ whole stays provable; only the standalone body digest is omitted, and the record
 - A hash chain detects tampering; it does not prevent it. **Truncating the tail is not detectable
   from the index alone** — see [Integrity](docs/integrity.md#what-this-does-and-does-not-prove) for
   the out-of-band anchor that closes this.
-- Changing the index prefix or project ID mid-session sends already-captured records to the new
-  index, splitting one chain across two. Set them before you start capturing.
+- A running extension keeps its original project/index until reload. SQLite preserves separate
+  backlogs and chain tips for each index; return to that index to resume its pending uploads.
+- Upgrading an old SQLite spool requires matching original chain preferences to identify its
+  destination. Unidentified records are retained for recovery and never guessed into a new index.
+  See [SQLite upgrade recovery](docs/troubleshooting.md#upgrading-an-existing-sqlite-spool).
 
 ## Development
 
-Requires JDK 17; Gradle does not run on JDK 25 or newer.
+Requires JDK 17 and Python 3 (the tests run the independent verifier). Gradle does not run on JDK 25 or newer.
 
 ```bash
 JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew test shadowJar

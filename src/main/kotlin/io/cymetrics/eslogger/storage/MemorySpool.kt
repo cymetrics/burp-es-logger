@@ -36,6 +36,7 @@ class MemorySpool(private val maxBytes: Long = DEFAULT_MAX_BYTES) : RecordSpool 
     override fun usageBytes(): Long = synchronized(lock) { bytes }
 
     override fun insertAll(records: List<NewRecord>) = synchronized(lock) {
+        if (records.isEmpty()) return@synchronized
         for (r in records) {
             queue.addLast(Pending(r.seq, r.docId, r.docJson, r.byteSize))
             bytes += r.byteSize.toLong()
@@ -51,8 +52,18 @@ class MemorySpool(private val maxBytes: Long = DEFAULT_MAX_BYTES) : RecordSpool 
         pendingCount = queue.size.toLong()
     }
 
-    override fun pendingBatch(limit: Int): List<Pending> = synchronized(lock) {
-        if (queue.size <= limit) queue.toList() else queue.take(limit)
+    override fun pendingBatch(limit: Int, maxBytes: Long): List<Pending> = synchronized(lock) {
+        require(limit >= 0 && maxBytes >= 0)
+        val out = ArrayList<Pending>(minOf(limit, queue.size))
+        var total = 0L
+        for (row in queue) {
+            if (out.size >= limit) break
+            if (out.isNotEmpty() && row.byteSize > maxBytes - total) break
+            out.add(row)
+            total += row.byteSize
+            if (total >= maxBytes) break
+        }
+        out
     }
 
     override fun purge(seqs: Collection<Long>): Int = synchronized(lock) {

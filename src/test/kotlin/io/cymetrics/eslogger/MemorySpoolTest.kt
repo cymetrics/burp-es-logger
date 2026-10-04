@@ -81,4 +81,25 @@ class MemorySpoolTest {
 
         assertEquals(listOf(1L, 2L, 3L), spool.pendingBatch(3).map { it.seq })
     }
+
+    @Test
+    fun `reading respects byte budget but includes one oversized record`() {
+        val spool = MemorySpool()
+        spool.insertAll((1L..3L).map { record(it, "測".repeat(10)) })
+
+        assertEquals(listOf(1L, 2L), spool.pendingBatch(10, 60).map { it.seq })
+        assertEquals(listOf(1L), spool.pendingBatch(10, 20).map { it.seq })
+        assertTrue(spool.pendingBatch(0).isEmpty())
+    }
+
+    @Test
+    fun `empty insert preserves existing state`() {
+        val spool = MemorySpool()
+        spool.insertAll(listOf(record(1)))
+        spool.insertAll(emptyList())
+
+        assertEquals(1, spool.pendingCount)
+        assertEquals(1, spool.lastSeq)
+        assertEquals("hash-1", spool.lastHash)
+    }
 }

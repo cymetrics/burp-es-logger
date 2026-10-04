@@ -196,6 +196,9 @@ PUT _index_template/burp-log
             "prev_hash": {
               "type": "keyword"
             },
+            "payload_sha256": {
+              "type": "keyword"
+            },
             "record_sha256": {
               "type": "keyword"
             }
@@ -214,9 +217,10 @@ PUT burp-log-<project_id>/_mapping
     "request":   { "properties": { "hashes_skipped": { "type": "boolean" } } },
     "response":  { "properties": { "hashes_skipped": { "type": "boolean" } } },
     "websocket": { "properties": { "hashes_skipped": { "type": "boolean" },
-                                    "body_skip_reason": { "type": "keyword" } } }
+                                    "body_skip_reason": { "type": "keyword" } } },
+    "integrity": { "properties": { "payload_sha256": { "type": "keyword" } } }
   }
 }
 
-# 3. 確認（應該看得到 hashes_skipped）
-GET burp-log-<project_id>/_mapping/field/request.hashes_skipped
+# 3. 確認（應該看得到 hashes_skipped 與 v2 payload_sha256）
+GET burp-log-<project_id>/_mapping/field/request.hashes_skipped,integrity.payload_sha256

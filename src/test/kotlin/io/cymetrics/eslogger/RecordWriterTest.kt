@@ -1,6 +1,7 @@
 package io.cymetrics.eslogger
 
 import com.google.gson.JsonObject
+import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import io.cymetrics.eslogger.config.Config
 import io.cymetrics.eslogger.core.RecordWriter
@@ -14,6 +15,8 @@ import io.cymetrics.eslogger.model.RequestCaptured
 import io.cymetrics.eslogger.model.RespData
 import io.cymetrics.eslogger.model.ResponseCaptured
 import java.security.MessageDigest
+import java.io.ByteArrayOutputStream
+import java.math.BigDecimal
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -21,7 +24,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
- * RecordWriter 掌管 seq、hash chain 與 material 欄位清單 —— 也就是這個工具全部的
+ * RecordWriter 掌管 seq、hash chain 與儲存內容 —— 也就是這個工具全部的
  * 完整性主張。這裡的驗證器**獨立重算**文件（README / setup.md）所寫的公式，
  * 不呼叫 Hashing.recordHash，否則程式與文件一起漂移也不會有人發現。
  */
@@ -29,38 +32,45 @@ class RecordWriterTest {
 
     // ---- 文件版的驗證器 ----
 
-    private fun documentedMaterial(doc: JsonObject): List<String> {
-        fun s(path: String): String {
-            var node: JsonObject? = doc
-            val parts = path.split('.')
-            parts.dropLast(1).forEach { node = node?.getAsJsonObject(it) }
-            val leaf = node?.get(parts.last()) ?: return ""
-            return if (leaf.isJsonNull) "" else leaf.asString
-        }
-        fun n(path: String): String {
-            var node: JsonObject? = doc
-            val parts = path.split('.')
-            parts.dropLast(1).forEach { node = node?.getAsJsonObject(it) }
-            val leaf = node?.get(parts.last()) ?: return ""
-            return if (leaf.isJsonNull) "" else leaf.asLong.toString()
-        }
-        return listOf(
-            n("seq"), s("doc_id"), s("type"),
-            s("session_id"), s("tester_id"), s("project_id"), s("capture_host"),
-            s("request.time"), s("response.time"),
-            s("tool"), s("request.method"), s("request.url"), n("response.status"),
-            s("request.raw_sha256"), s("request.body_sha256"),
-            s("response.raw_sha256"), s("response.body_sha256")
-        )
-    }
-
     private fun documentedHash(doc: JsonObject, prevHash: String): String {
-        val material = StringBuilder(prevHash)
-        for (field in documentedMaterial(doc)) {
-            material.append(field.toByteArray(Charsets.UTF_8).size).append(':').append(field)
+        // Independent, deliberately small reference encoder. The production implementation
+        // streams to MessageDigest; this one builds the documented byte sequence first.
+        val bytes = ByteArrayOutputStream()
+        fun ascii(text: String) { bytes.write(text.toByteArray(Charsets.US_ASCII)) }
+        fun string(text: String) {
+            ascii("s${text.length.toLong() * 2}:")
+            for (char in text) {
+                bytes.write(char.code ushr 8)
+                bytes.write(char.code and 255)
+            }
         }
-        val digest = MessageDigest.getInstance("SHA-256").digest(material.toString().toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }
+        fun node(value: JsonElement, root: Boolean = false) {
+            when {
+                value.isJsonNull -> ascii("n")
+                value.isJsonArray -> {
+                    ascii("a${value.asJsonArray.size()}:")
+                    value.asJsonArray.forEach { node(it) }
+                }
+                value.isJsonObject -> {
+                    val keys = value.asJsonObject.keySet().filter { !root || it != "integrity" }.sorted()
+                    ascii("o${keys.size}:")
+                    keys.forEach { string(it); node(value.asJsonObject[it]) }
+                }
+                value.asJsonPrimitive.isBoolean -> ascii(if (value.asBoolean) "t" else "f")
+                value.asJsonPrimitive.isNumber -> {
+                    val number = BigDecimal(value.asString).stripTrailingZeros().toPlainString()
+                    ascii("d${number.length}:$number")
+                }
+                else -> string(value.asString)
+            }
+        }
+        fun digest(value: ByteArray) = MessageDigest.getInstance("SHA-256").digest(value)
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        node(doc, root = true)
+        val payload = digest(bytes.toByteArray())
+        val fields = listOf("burp-es-logger-v2", payload)
+        val material = prevHash + fields.joinToString("") { "${it.toByteArray(Charsets.UTF_8).size}:$it" }
+        return digest(material.toByteArray(Charsets.UTF_8))
     }
 
     // ---- 測試用具 ----

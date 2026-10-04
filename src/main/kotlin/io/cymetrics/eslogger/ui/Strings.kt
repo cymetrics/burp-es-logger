@@ -85,6 +85,7 @@ class Strings(
 
     private val tplLoaded: String,
     private val tplSaved: String,
+    private val tplReloadTarget: String,
     private val tplSaveFailed: String,
     private val tplSentBatch: String,
     private val tplUploadFailed: String,
@@ -101,6 +102,7 @@ class Strings(
 ) {
     fun loaded(index: String) = tplLoaded.format(index)
     fun saved(index: String) = tplSaved.format(index)
+    fun reloadTarget(active: String, saved: String) = tplReloadTarget.format(active, saved)
     fun saveFailed(msg: String?) = tplSaveFailed.format(msg ?: "?")
     fun sentBatch(n: Int) = tplSentBatch.format(n)
     fun uploadFailed(msg: String?) = tplUploadFailed.format(msg ?: "?")
@@ -133,7 +135,7 @@ class Strings(
             indexPrefix = "Index 前綴",
             testerId = "Tester ID",
             projectId = "Project ID",
-            projectHint = "將併入 index 名稱，建議每個案件使用獨立值。",
+            projectHint = "將併入 index 名稱，建議每個案件使用獨立值。變更 Project ID 或 Index 前綴後需重新載入擴充；重載前仍使用原專案。",
             excludedExt = "排除類型",
             excludedHint = "同時比對副檔名與 Content-Type。排除的 body 仍會記錄長度與雜湊。",
             maxBody = "body 上限",
@@ -174,6 +176,7 @@ class Strings(
             numberRequired = "請填入數字",
             tplLoaded = "設定已載入，目標 index：%s",
             tplSaved = "已儲存，目標 index：%s",
+            tplReloadTarget = "設定已儲存。目前仍記錄至 %s；重新載入擴充後套用 %s。",
             tplSaveFailed = "儲存失敗：%s",
             tplSentBatch = "已送出一批，成功寫入 %d 筆",
             tplUploadFailed = "上傳失敗：%s",
@@ -204,7 +207,7 @@ class Strings(
             indexPrefix = "Index prefix",
             testerId = "Tester ID",
             projectId = "Project ID",
-            projectHint = "Becomes part of the index name. Use a distinct value per engagement.",
+            projectHint = "Becomes part of the index name. Use a distinct value per engagement. Reload after changing Project ID or index prefix; the active project stays unchanged until then.",
             excludedExt = "Excluded types",
             excludedHint = "Matched against both the file extension and the Content-Type. Skipped bodies still record their length and hash.",
             maxBody = "Max body size",
@@ -245,6 +248,7 @@ class Strings(
             numberRequired = "Enter a number",
             tplLoaded = "Settings loaded — target index: %s",
             tplSaved = "Saved — target index: %s",
+            tplReloadTarget = "Saved. Still recording to %s; reload the extension to apply %s.",
             tplSaveFailed = "Save failed: %s",
             tplSentBatch = "Batch sent; %d records accepted",
             tplUploadFailed = "Upload failed: %s",

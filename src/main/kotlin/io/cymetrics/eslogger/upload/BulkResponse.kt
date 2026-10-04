@@ -11,41 +11,49 @@ import io.cymetrics.eslogger.storage.Pending
  */
 object BulkResponse {
 
+    data class Rejected(val row: Pending, val status: Int, val reason: String)
+
     data class Result(
         val accepted: List<Pending>,
         /** 被拒絕的那幾筆，附上 ES 給的原因。 */
-        val rejected: List<Pair<Pending, String>>
+        val rejected: List<Rejected>
     )
 
     /**
      * [body] 是 HTTP 2xx 的 `_bulk` 回應。`items` 的順序與送出順序一致，以索引對位。
      *
-     * 判讀不出來（沒有 items、或根本不是 JSON）時保守視為全部成功：走到這裡代表
-     * HTTP 已經是 2xx，若當成失敗就會把已經寫進 ES 的資料再送一輪。
+     * 回應必須能逐筆對應。無法確認時保留整批並重試；create + 固定 _id 讓重送安全。
      */
     fun parse(body: String, batch: List<Pending>): Result {
         val items = try {
             JsonParser.parseString(body).asJsonObject.getAsJsonArray("items")
-        } catch (t: Throwable) {
-            null
-        } ?: return Result(batch, emptyList())
+        } catch (e: Exception) {
+            throw IllegalStateException("Invalid bulk response; records retained for retry", e)
+        } ?: throw IllegalStateException("Bulk response has no items; records retained for retry")
+        check(items.size() == batch.size) { "Bulk response item count does not match the submitted batch" }
 
         val accepted = ArrayList<Pending>(batch.size)
-        val rejected = ArrayList<Pair<Pending, String>>()
+        val rejected = ArrayList<Rejected>()
 
         for ((i, item) in items.withIndex()) {
-            val row = batch.getOrNull(i) ?: continue   // 回應比送出的還多筆就忽略
+            val row = batch[i]
             val create = try {
                 item.asJsonObject.getAsJsonObject("create")
-            } catch (t: Throwable) {
-                null
-            } ?: continue
-            val status = create.get("status")?.asInt ?: 0
+            } catch (e: Exception) {
+                throw IllegalStateException("Invalid bulk create result at item $i", e)
+            } ?: throw IllegalStateException("Bulk response is missing create result at item $i")
+            val statusValue = create.get("status")
+            check(statusValue != null && statusValue.isJsonPrimitive &&
+                statusValue.asJsonPrimitive.isNumber && statusValue.asString.matches(Regex("[1-5][0-9]{2}"))) {
+                "Bulk response is missing a valid status at item $i"
+            }
+            val status = statusValue.asInt
+            create.get("_id")?.let { check(it.asString == row.docId) { "Bulk response document ID mismatch at item $i" } }
             // 409 = 這個 _id 已經存在。自訂 _id 讓重送具冪等性，所以這也是成功。
             if (status == 200 || status == 201 || status == 409) {
                 accepted.add(row)
             } else {
-                rejected.add(row to (create.get("error")?.toString()?.take(200) ?: "status=$status"))
+                rejected.add(Rejected(row, status, create.get("error")?.toString()?.take(200) ?: "status=$status"))
             }
         }
         return Result(accepted, rejected)

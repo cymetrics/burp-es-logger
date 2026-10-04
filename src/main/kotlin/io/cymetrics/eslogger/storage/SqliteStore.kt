@@ -1,116 +1,260 @@
 package io.cymetrics.eslogger.storage
 
+import com.google.gson.JsonParser
 import io.cymetrics.eslogger.integrity.Hashing
 import java.io.File
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.PreparedStatement
-import java.sql.Statement
 import java.time.Instant
 
 /**
- * 本地 **outbox**（不是封存）。
+ * 本地 outbox：確認進入 ES 就刪除，鏈尾與未送出的紀錄依目標 index 分開保存。
+ * 同一個 DB 可在不同專案間重用，各 index 的 seq、purge 與鏈尾互不影響。
+ * 單一連線 + 鎖讓 writer、uploader 的交易互斥；UI 讀取記憶體計數器。
  *
- * 設計取捨：成功進到 ES 的紀錄會立刻從本地刪掉，本機只留還沒送出去的部分，
- * 所以 DB 大小正比於「積壓量」而不是「總流量」；ES 可達時這張表通常是空的。
- * 代價是本地不再有完整副本，**ES 就是唯一的稽核來源**。
- *
- * hash chain 不受影響：鏈只需要「上一筆的 hash」就能接下去。鏈尾存在 [meta] 表，
- * 和紀錄寫入在同一個交易裡 commit，所以 outbox 被清空、甚至整個 session 重來都接得下去。
- *
- * 執行緒：單一連線 + 一把鎖。writer 批次寫、uploader 批次刪，UI 只讀記憶體計數器，
- * 不碰 SQL（原本 UI 每 5 秒一次 COUNT(*) 全表掃描，表一大就會卡住 writer）。
+ * 舊版 DB 沒有目標 index。只有 [legacyTip] 與舊鏈尾完全相符、且所有待送文件的
+ * project_id 都符合 [legacyProjectId] 時才認領舊資料；
+ * 不能辨識的資料保留在 legacy 表，不能把它猜成目前專案並上傳。
  */
-class SqliteStore(private val dbPath: String) : RecordSpool {
+class SqliteStore(
+    private val dbPath: String,
+    private val targetIndex: String,
+    legacyTip: Pair<Long, String>? = null,
+    legacyProjectId: String? = null
+) : RecordSpool {
 
     private val conn: Connection
     private val lock = Any()
-
     private val insertStmt: PreparedStatement
     private val pendingStmt: PreparedStatement
     private val metaStmt: PreparedStatement
 
-    /** 鏈尾：下一筆要接在這個 seq / hash 後面。 */
     @Volatile override var lastSeq: Long = 0
         private set
     @Volatile override var lastHash: String = Hashing.GENESIS
         private set
-
-    /** 還留在本地、尚未確認上傳的筆數。 */
     @Volatile override var pendingCount: Long = 0
         private set
 
+    /** 尚無法確認屬於哪個 index 的舊版積壓，保留但不會由這個實例上傳或刪除。 */
+    val legacyPendingCount: Long
+
     init {
+        require(targetIndex.isNotBlank())
         Class.forName("org.sqlite.JDBC")
         conn = DriverManager.getConnection("jdbc:sqlite:$dbPath")
-        conn.autoCommit = true
-
-        conn.createStatement().use { st ->
-            st.execute("PRAGMA journal_mode=WAL")
-            st.execute("PRAGMA synchronous=NORMAL")
-            st.execute("PRAGMA busy_timeout=5000")
-            // 刪除後把空頁還給檔案系統，否則 DB 檔只會停在歷史高水位。
-            st.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            // WAL 檢查點後把檔案截回 8 MB，避免長時間執行後 -wal 檔無限長大。
-            st.execute("PRAGMA journal_size_limit=8388608")
-
-            st.execute(
-                """
-                CREATE TABLE IF NOT EXISTS outbox (
-                    seq        INTEGER PRIMARY KEY,
-                    doc_id     TEXT NOT NULL,
-                    doc_json   TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """.trimIndent()
+        try {
+            conn.createStatement().use { st ->
+                st.execute("PRAGMA busy_timeout=5000")
+                st.execute("PRAGMA journal_mode=WAL")
+                st.execute("PRAGMA synchronous=NORMAL")
+                st.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                st.execute("PRAGMA journal_size_limit=8388608")
+            }
+            initializeSchema(legacyTip, legacyProjectId)
+            insertStmt = conn.prepareStatement(
+                "INSERT INTO outbox(target_index, seq, doc_id, doc_json, byte_size, created_at) VALUES(?,?,?,?,?,?)"
             )
-            st.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
-            // outbox 裡每一列都是待上傳，取批次就是 seq 順序掃，不需要任何二級索引。
-            migrateLegacyArchive(st)
+            pendingStmt = conn.prepareStatement(
+                "SELECT seq, doc_id, byte_size, doc_json FROM outbox WHERE target_index=? ORDER BY seq ASC LIMIT ?"
+            )
+            metaStmt = conn.prepareStatement(
+                "INSERT INTO meta(target_index, k, v) VALUES(?, ?, ?) " +
+                    "ON CONFLICT(target_index, k) DO UPDATE SET v=excluded.v"
+            )
+            restoreState()
+            legacyPendingCount = countLegacyPending()
+        } catch (t: Throwable) {
+            try { conn.close() } catch (_: Exception) {}
+            throw t
         }
-
-        insertStmt = conn.prepareStatement(
-            "INSERT INTO outbox(seq, doc_id, doc_json, created_at) VALUES(?,?,?,?)"
-        )
-        pendingStmt = conn.prepareStatement(
-            "SELECT seq, doc_id, doc_json FROM outbox ORDER BY seq ASC LIMIT ?"
-        )
-        metaStmt = conn.prepareStatement(
-            "INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"
-        )
-
-        restoreState()
     }
 
-    /**
-     * 舊版把所有紀錄永久留在 `records` 表（全量封存）。改成 outbox 後：
-     * 還沒上傳的搬過來，已上傳的直接丟掉（ES 已經有了），然後整張表刪掉並 VACUUM。
-     */
-    private fun migrateLegacyArchive(st: Statement) {
-        val hasLegacy = st.executeQuery(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='records'"
-        ).use { it.next() }
-        if (!hasLegacy) return
+    private fun tableExists(name: String): Boolean = conn.prepareStatement(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
+    ).use { st ->
+        st.setString(1, name)
+        st.executeQuery().use { it.next() }
+    }
 
-        st.executeQuery("SELECT seq, record_sha256 FROM records ORDER BY seq DESC LIMIT 1").use { rs ->
-            if (rs.next()) {
-                val seq = rs.getLong(1)
-                val hash = rs.getString(2)
-                st.executeUpdate("INSERT OR REPLACE INTO meta(k, v) VALUES('chain_seq', '$seq')")
-                st.executeUpdate("INSERT OR REPLACE INTO meta(k, v) VALUES('chain_hash', '$hash')")
+    /** 表名只有本類別的常數會傳入，不接受設定值。 */
+    private fun hasTargetColumn(table: String): Boolean = conn.createStatement().use { st ->
+        st.executeQuery("PRAGMA table_info($table)").use { rs ->
+            var found = false
+            while (rs.next()) if (rs.getString("name") == "target_index") found = true
+            found
+        }
+    }
+
+    /** 包含改名、複製、鏈尾與刪除舊表在內的單一交易，失敗會完整回復。 */
+    private fun initializeSchema(legacyTip: Pair<Long, String>?, legacyProjectId: String?) {
+        conn.autoCommit = false
+        try {
+            conn.createStatement().use { st ->
+                for (table in listOf("outbox", "meta")) {
+                    if (tableExists(table) && !hasTargetColumn(table)) {
+                        st.execute("ALTER TABLE $table RENAME TO legacy_$table")
+                    }
+                }
+                st.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS outbox (
+                        target_index TEXT NOT NULL,
+                        seq          INTEGER NOT NULL,
+                        doc_id       TEXT NOT NULL,
+                        doc_json     TEXT NOT NULL,
+                        byte_size    INTEGER NOT NULL,
+                        created_at   TEXT NOT NULL,
+                        PRIMARY KEY(target_index, seq)
+                    )
+                    """.trimIndent()
+                )
+                st.execute(
+                    "CREATE TABLE IF NOT EXISTS meta (" +
+                        "target_index TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, " +
+                        "PRIMARY KEY(target_index, k))"
+                )
+            }
+            val oldTip = legacyChainTip()
+            if (oldTip != null && oldTip.first > 0 && legacyTip == oldTip &&
+                legacyProjectId != null && legacyRowsMatchProject(legacyProjectId)) {
+                claimLegacy(oldTip)
+            }
+            conn.commit()
+        } catch (t: Throwable) {
+            conn.rollback()
+            throw t
+        } finally {
+            conn.autoCommit = true
+        }
+    }
+
+    /** 鏈尾相符仍不保證舊積壓只有一個專案；混雜、缺欄位或無法解析時整批保留。 */
+    private fun legacyRowsMatchProject(project: String): Boolean {
+        for (source in listOf("legacy_outbox", "records")) {
+            if (!tableExists(source)) continue
+            val filter = if (source == "records") " WHERE uploaded=0" else ""
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT doc_json FROM $source$filter").use { rs ->
+                    while (rs.next()) {
+                        val matches = try {
+                            val field = JsonParser.parseString(rs.getString(1)).asJsonObject.get("project_id")
+                            field != null && field.isJsonPrimitive && field.asJsonPrimitive.isString &&
+                                field.asString == project
+                        } catch (_: Exception) { false }
+                        if (!matches) return false
+                    }
+                }
             }
         }
-        st.executeUpdate(
-            "INSERT OR IGNORE INTO outbox(seq, doc_id, doc_json, created_at) " +
-                "SELECT seq, doc_id, doc_json, created_at FROM records WHERE uploaded=0"
-        )
-        st.execute("DROP TABLE records")
-        st.execute("VACUUM")   // 一次性：套用 auto_vacuum 設定並把舊資料佔的頁還回去
+        return true
+    }
+
+    private fun legacyChainTip(): Pair<Long, String>? {
+        var tip: Pair<Long, String>? = null
+        if (tableExists("legacy_meta")) {
+            val values = mutableMapOf<String, String>()
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT k, v FROM legacy_meta WHERE k IN ('chain_seq','chain_hash')").use { rs ->
+                    while (rs.next()) values[rs.getString(1)] = rs.getString(2)
+                }
+            }
+            val seq = values["chain_seq"]?.toLongOrNull()
+            val hash = values["chain_hash"]
+            if (seq != null && hash != null) tip = seq to hash
+        }
+        if (tableExists("records")) {
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT seq, record_sha256 FROM records ORDER BY seq DESC LIMIT 1").use { rs ->
+                    if (rs.next()) {
+                        val archiveTip = rs.getLong(1) to rs.getString(2)
+                        // 相同序號卻不同 hash 不能認領，保留給人工復原。
+                        if (tip?.first == archiveTip.first && tip != archiveTip) return null
+                        if (tip == null || archiveTip.first > tip!!.first) tip = archiveTip
+                    }
+                }
+            }
+        }
+        return tip
+    }
+
+    private fun claimLegacy(tip: Pair<Long, String>) {
+        for (source in listOf("legacy_outbox", "records")) {
+            if (!tableExists(source)) continue
+            val filter = if (source == "records") " AND old.uploaded=0" else ""
+            // 支援舊版遷移中斷後兩張表暫時並存，但絕不以 IGNORE 吃掉內容不同的同序號資料。
+            conn.prepareStatement(
+                "SELECT 1 FROM $source old JOIN outbox current " +
+                    "ON current.target_index=? AND current.seq=old.seq " +
+                    "WHERE (current.doc_id IS NOT old.doc_id OR current.doc_json IS NOT old.doc_json)$filter LIMIT 1"
+            ).use { st ->
+                st.setString(1, targetIndex)
+                check(!st.executeQuery().use { it.next() }) { "Legacy spool conflicts with target $targetIndex; data preserved" }
+            }
+            conn.prepareStatement(
+                "INSERT INTO outbox(target_index, seq, doc_id, doc_json, byte_size, created_at) " +
+                    "SELECT ?, old.seq, old.doc_id, old.doc_json, length(CAST(old.doc_json AS BLOB)), old.created_at " +
+                    "FROM $source old WHERE 1=1$filter AND NOT EXISTS " +
+                    "(SELECT 1 FROM outbox current WHERE current.target_index=? AND current.seq=old.seq)"
+            ).use { st ->
+                st.setString(1, targetIndex)
+                st.setString(2, targetIndex)
+                st.executeUpdate()
+            }
+        }
+        val currentSeq = conn.prepareStatement(
+            "SELECT v FROM meta WHERE target_index=? AND k='chain_seq'"
+        ).use { st ->
+            st.setString(1, targetIndex)
+            st.executeQuery().use { rs -> if (rs.next()) rs.getString(1).toLongOrNull() ?: 0L else 0L }
+        }
+        if (tip.first == currentSeq) {
+            val currentHash = conn.prepareStatement(
+                "SELECT v FROM meta WHERE target_index=? AND k='chain_hash'"
+            ).use { st ->
+                st.setString(1, targetIndex)
+                st.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+            }
+            check(currentHash == tip.second) { "Legacy chain conflicts with target $targetIndex; data preserved" }
+        }
+        if (tip.first >= currentSeq) {
+            conn.prepareStatement(
+                "INSERT INTO meta(target_index, k, v) VALUES(?,?,?) " +
+                    "ON CONFLICT(target_index,k) DO UPDATE SET v=excluded.v"
+            ).use { st ->
+                for ((key, value) in listOf("chain_seq" to tip.first.toString(), "chain_hash" to tip.second)) {
+                    st.setString(1, targetIndex)
+                    st.setString(2, key)
+                    st.setString(3, value)
+                    st.executeUpdate()
+                }
+            }
+        }
+        conn.createStatement().use { st ->
+            st.execute("DROP TABLE IF EXISTS legacy_outbox")
+            st.execute("DROP TABLE IF EXISTS legacy_meta")
+            st.execute("DROP TABLE IF EXISTS records")
+        }
+    }
+
+    private fun countLegacyPending(): Long {
+        val sources = mutableListOf<String>()
+        if (tableExists("legacy_outbox")) sources.add("SELECT seq FROM legacy_outbox")
+        if (tableExists("records")) sources.add("SELECT seq FROM records WHERE uploaded=0")
+        if (sources.isEmpty()) return 0
+        return conn.createStatement().use { st ->
+            st.executeQuery("SELECT COUNT(*) FROM (${sources.joinToString(" UNION ")})").use { rs ->
+                rs.next()
+                rs.getLong(1)
+            }
+        }
     }
 
     private fun restoreState() = synchronized(lock) {
-        conn.createStatement().use { st ->
-            st.executeQuery("SELECT k, v FROM meta WHERE k IN ('chain_seq','chain_hash')").use { rs ->
+        conn.prepareStatement("SELECT k, v FROM meta WHERE target_index=?").use { st ->
+            st.setString(1, targetIndex)
+            st.executeQuery().use { rs ->
                 while (rs.next()) {
                     when (rs.getString(1)) {
                         "chain_seq" -> lastSeq = rs.getString(2).toLongOrNull() ?: 0
@@ -118,43 +262,40 @@ class SqliteStore(private val dbPath: String) : RecordSpool {
                     }
                 }
             }
-            st.executeQuery("SELECT COUNT(*), COALESCE(MAX(seq), 0) FROM outbox").use { rs ->
+        }
+        conn.prepareStatement("SELECT COUNT(*), COALESCE(MAX(seq),0) FROM outbox WHERE target_index=?").use { st ->
+            st.setString(1, targetIndex)
+            st.executeQuery().use { rs ->
                 if (rs.next()) {
                     pendingCount = rs.getLong(1)
-                    // 還沒送出去的 seq 一定要納入鏈尾，否則重啟後會發出重複的 seq。
                     lastSeq = maxOf(lastSeq, rs.getLong(2))
                 }
             }
         }
     }
 
-    override val droppedCount: Long get() = 0   // 落地模式不丟資料，積壓多少就留多少
-
+    override val droppedCount: Long get() = 0
     override val kind: SpoolKind get() = SpoolKind.DISK
 
-    /**
-     * 一個交易寫入整批，並在同一個交易裡推進鏈尾。
-     * 原本一筆一個交易（還每次重新 prepare），高流量下 commit 次數就是瓶頸。
-     */
     override fun insertAll(records: List<NewRecord>) = synchronized(lock) {
         if (records.isEmpty()) return@synchronized
         val now = Instant.now().toString()
         conn.autoCommit = false
         try {
             for (r in records) {
-                insertStmt.setLong(1, r.seq)
-                insertStmt.setString(2, r.docId)
-                insertStmt.setString(3, r.docJson)
-                insertStmt.setString(4, now)
+                insertStmt.setString(1, targetIndex)
+                insertStmt.setLong(2, r.seq)
+                insertStmt.setString(3, r.docId)
+                insertStmt.setString(4, r.docJson)
+                insertStmt.setInt(5, r.byteSize)
+                insertStmt.setString(6, now)
                 insertStmt.addBatch()
             }
             insertStmt.executeBatch()
-
             val last = records.last()
             writeMeta("chain_seq", last.seq.toString())
             writeMeta("chain_hash", last.recordHash)
             conn.commit()
-
             lastSeq = last.seq
             lastHash = last.recordHash
             pendingCount += records.size
@@ -168,54 +309,53 @@ class SqliteStore(private val dbPath: String) : RecordSpool {
     }
 
     private fun writeMeta(k: String, v: String) {
-        metaStmt.setString(1, k)
-        metaStmt.setString(2, v)
+        metaStmt.setString(1, targetIndex)
+        metaStmt.setString(2, k)
+        metaStmt.setString(3, v)
         metaStmt.executeUpdate()
     }
 
-    override fun pendingBatch(limit: Int): List<Pending> = synchronized(lock) {
+    override fun pendingBatch(limit: Int, maxBytes: Long): List<Pending> = synchronized(lock) {
+        require(limit >= 0 && maxBytes >= 0)
         val out = ArrayList<Pending>(minOf(limit, 512))
-        pendingStmt.setInt(1, limit)
+        var bytes = 0L
+        pendingStmt.setString(1, targetIndex)
+        pendingStmt.setInt(2, limit)
         pendingStmt.executeQuery().use { rs ->
             while (rs.next()) {
-                val json = rs.getString(3)
-                out.add(Pending(rs.getLong(1), rs.getString(2), json, json.toByteArray(Charsets.UTF_8).size))
+                val size = rs.getInt(3)
+                // 先讀已保存的位元組數，確認放得下才從 JDBC 解碼這筆 JSON。
+                if (out.isNotEmpty() && size > maxBytes - bytes) break
+                out.add(Pending(rs.getLong(1), rs.getString(2), rs.getString(4), size))
+                bytes += size
+                if (bytes >= maxBytes) break
             }
         }
         out
     }
 
-    /**
-     * 確認已進 ES 的紀錄直接刪除 —— 本地不保留副本，這就是「上傳即清空」的實作點。
-     * seq 是 rowid，直接走主鍵刪除；回傳實際刪掉的筆數。
-     */
     override fun purge(seqs: Collection<Long>): Int = synchronized(lock) {
         if (seqs.isEmpty()) return@synchronized 0
-        // seq 是 Long，字串組裝沒有注入風險，而且一句 SQL 就拿得到精確刪除筆數。
         val inList = seqs.joinToString(",")
-        val deleted = conn.createStatement().use { st ->
-            st.executeUpdate("DELETE FROM outbox WHERE seq IN ($inList)")
+        val deleted = conn.prepareStatement("DELETE FROM outbox WHERE target_index=? AND seq IN ($inList)").use { st ->
+            st.setString(1, targetIndex)
+            st.executeUpdate()
         }
         if (deleted > 0) {
             pendingCount = (pendingCount - deleted).coerceAtLeast(0)
-            // 把剛空出來的頁還給檔案系統；沒東西可回收時幾乎零成本。
             conn.createStatement().use { it.execute("PRAGMA incremental_vacuum") }
         }
         deleted
     }
 
-    /** 本地實際佔用的位元組（含 WAL / shm）。 */
-    override fun usageBytes(): Long {
-        val base = File(dbPath)
-        return listOf(base, File("$dbPath-wal"), File("$dbPath-shm"))
-            .sumOf { if (it.exists()) it.length() else 0L }
-    }
+    /** 整個 DB 的實際大小，包含其他專案與尚未認領的舊版資料。 */
+    override fun usageBytes(): Long = listOf(File(dbPath), File("$dbPath-wal"), File("$dbPath-shm"))
+        .sumOf { if (it.exists()) it.length() else 0L }
 
     override fun close() = synchronized(lock) {
         try { insertStmt.close() } catch (_: Exception) {}
         try { pendingStmt.close() } catch (_: Exception) {}
         try { metaStmt.close() } catch (_: Exception) {}
-        // 關閉前把 WAL 併回主檔，下次啟動不用重播，檔案也小一點。
         try { conn.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } } catch (_: Exception) {}
         try { conn.close() } catch (_: Exception) {}
     }

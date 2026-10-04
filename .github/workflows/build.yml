@@ -28,6 +28,9 @@ jobs:
       - name: Test
         run: ./gradlew --no-daemon test
 
+      - name: Test Python integrity verifier
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools -p 'test_*.py' -v
+
       - name: Build shadow jar
         run: ./gradlew --no-daemon shadowJar
 

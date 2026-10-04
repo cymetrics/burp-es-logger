@@ -191,6 +191,9 @@
             "prev_hash": {
               "type": "keyword"
             },
+            "payload_sha256": {
+              "type": "keyword"
+            },
             "record_sha256": {
               "type": "keyword"
             }

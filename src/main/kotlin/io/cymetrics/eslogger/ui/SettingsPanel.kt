@@ -535,8 +535,10 @@ class SettingsPanel(
             tfEndpoint.text = config.esEndpoint
             dirty = false
             updateDerivedLabels()
-            if (clamped) setStatus(Tone.WARN) { it.clampedToRange(config.indexName()) }
-            else setStatus(Tone.OK) { it.saved(config.indexName()) }
+            if (config.indexName() != uploader.targetIndex || config.projectId != writer.projectId) {
+                setStatus(Tone.WARN) { it.reloadTarget(uploader.targetIndex, config.indexName()) }
+            } else if (clamped) setStatus(Tone.WARN) { it.clampedToRange(uploader.targetIndex) }
+            else setStatus(Tone.OK) { it.saved(uploader.targetIndex) }
         } catch (t: Throwable) {
             val msg = t.message
             setStatus(Tone.ERR) { it.saveFailed(msg) }

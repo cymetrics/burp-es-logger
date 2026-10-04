@@ -5,6 +5,7 @@ import io.cymetrics.eslogger.upload.BulkResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertFails
 
 /**
  * _bulk 回應的判讀。這是整個上傳迴圈裡最容易悄悄出錯的地方：
@@ -44,28 +45,26 @@ class BulkResponseTest {
         """.trimIndent()
         val result = BulkResponse.parse(body, rows(2))
         assertEquals(listOf(1L), result.accepted.map { it.seq })
-        assertEquals(listOf(2L), result.rejected.map { it.first.seq })
-        assertTrue(result.rejected.single().second.contains("mapper_parsing_exception"))
+        assertEquals(listOf(2L), result.rejected.map { it.row.seq })
+        assertTrue(result.rejected.single().reason.contains("mapper_parsing_exception"))
     }
 
     @Test
-    fun `a response without an items array is treated as fully accepted`() {
-        // 只有在 HTTP 2xx 的情況下才會走到這裡，保守視為全部成功，
-        // 否則會把已經寫進 ES 的資料重送一輪。
-        val result = BulkResponse.parse("""{"took":3,"errors":false}""", rows(2))
-        assertEquals(listOf(1L, 2L), result.accepted.map { it.seq })
+    fun `uncertain or misaligned responses never acknowledge a batch`() {
+        val invalidBodies = listOf(
+            "not json at all", "<html>login</html>", "{}", "{\"errors\":true}",
+            "{\"items\":[]}", "{\"items\":[{}]}",
+            "{\"items\":[{\"create\":{}}]}",
+            "{\"items\":[{\"create\":{\"status\":\"201\"}}]}",
+            "{\"items\":[{\"create\":{\"status\":201,\"_id\":\"wrong\"}}]}",
+            "{\"items\":[{\"create\":{\"status\":201}},{\"create\":{\"status\":201}}]}"
+        )
+        for (body in invalidBodies) assertFails(body) { BulkResponse.parse(body, rows(1)) }
     }
 
     @Test
-    fun `unparseable response is treated as fully accepted rather than crashing the loop`() {
-        val result = BulkResponse.parse("not json at all", rows(1))
-        assertEquals(listOf(1L), result.accepted.map { it.seq })
-    }
-
-    @Test
-    fun `items beyond the batch size are ignored`() {
-        val body = """{"items":[{"create":{"_id":"doc-1","status":201}},{"create":{"_id":"ghost","status":201}}]}"""
-        val result = BulkResponse.parse(body, rows(1))
-        assertEquals(1, result.accepted.size)
+    fun `rejected item status is retained for retry classification`() {
+        val body = """{"items":[{"create":{"status":429,"error":{"type":"es_rejected_execution_exception"}}}]}"""
+        assertEquals(429, BulkResponse.parse(body, rows(1)).rejected.single().status)
     }
 }

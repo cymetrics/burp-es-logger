@@ -3,10 +3,10 @@ package io.cymetrics.eslogger.core
 import burp.api.montoya.logging.Logging
 import io.cymetrics.eslogger.config.Config
 import io.cymetrics.eslogger.integrity.Hashing
+import io.cymetrics.eslogger.integrity.IntegrityV2
 import io.cymetrics.eslogger.model.*
 import io.cymetrics.eslogger.storage.ChainTipStore
 import io.cymetrics.eslogger.storage.NewRecord
-import io.cymetrics.eslogger.storage.Pending
 import io.cymetrics.eslogger.storage.RecordSpool
 import com.google.gson.JsonObject
 import java.net.InetAddress
@@ -33,17 +33,46 @@ import java.util.concurrent.TimeUnit
  * （5 萬筆 × 幾 MB 可以吃掉數 GB），所以用 [memoryBudget] 做位元組配額，
  * 滿了就讓 Burp 的執行緒等一下 —— 寧可慢，不漏記。
  */
-class RecordWriter(
+class RecordWriter internal constructor(
     private val config: Config,
     private val store: RecordSpool,
-    private val logging: Logging
+    private val logging: Logging,
+    private val limits: Limits
 ) {
-    /** 鏈尾的權威來源。Config 依目標 index 分開保存，所以換案子等於換一條鏈。 */
-    private val chainTip: ChainTipStore = config
-    private val queue: BlockingQueue<CaptureEvent> = ArrayBlockingQueue(QUEUE_CAPACITY)
-    private val memoryBudget = Semaphore(MAX_QUEUE_BYTES)
+    constructor(config: Config, store: RecordSpool, logging: Logging) :
+        this(config, store, logging, Limits())
 
-    private val pending = HashMap<Int, ReqData>()   // 只有 writer thread 存取
+    internal data class Limits(
+        val queueBytes: Int = 64 * 1024 * 1024,
+        val queueCapacity: Int = 20_000,
+        val pendingBytes: Long = 64L * 1024 * 1024,
+        val pendingRequests: Int = 20_000,
+        val writeBatch: Int = 128,
+        val bufferedRecords: Int = 1280,
+        val bufferedBytes: Long = 32L * 1024 * 1024,
+        val writeRetryMillis: Long = 1000
+    ) {
+        init {
+            require(queueBytes > 0 && queueCapacity > 0)
+            require(pendingBytes > 0 && pendingRequests > 0)
+            require(writeBatch > 0 && bufferedRecords > 0 && bufferedBytes > 0)
+            require(writeRetryMillis > 0)
+        }
+    }
+
+    /** 鏈尾的權威來源。Config 依目標 index 分開保存，所以換案子等於換一條鏈。 */
+    val targetIndex: String = config.indexName()
+    val projectId: String = config.projectId
+    private val chainTip: ChainTipStore = config.chainTipFor(targetIndex)
+    private val queue: BlockingQueue<CaptureEvent> = ArrayBlockingQueue(limits.queueCapacity)
+    private val memoryBudget = Semaphore(limits.queueBytes)
+    private val submissionLock = Any()
+
+    private val pending = LinkedHashMap<Int, ReqData>()   // 依抵達順序釋放最舊的 request
+    @Volatile private var pendingRawBytes = 0L
+    @Volatile var earlyFinalizedRequests = 0L
+        private set
+    private var lastPendingReport = 0L
     private val sessionId = UUID.randomUUID().toString()
     private val hostName: String = try { InetAddress.getLocalHost().hostName } catch (_: Exception) { "unknown" }
 
@@ -56,7 +85,11 @@ class RecordWriter(
     private var curHash: String
 
     /** 累積到一定量或佇列排空才寫進 SQLite，減少 commit 次數。 */
-    private val writeBuffer = ArrayList<NewRecord>(MAX_WRITE_BATCH)
+    private val writeBuffer = ArrayList<NewRecord>(limits.writeBatch)
+    private var writeBufferBytes = 0L
+    private var nextWriteAttemptNanos = 0L
+    private var lastBufferDropReport = 0L
+    private var lastBufferDroppedSeen = 0L
 
     @Volatile private var running = false
     private lateinit var thread: Thread
@@ -97,19 +130,33 @@ class RecordWriter(
             noteDiscardedAfterStop()
             return
         }
-        val cost = e.sizeBytes().coerceIn(1, MAX_QUEUE_BYTES)
-        // 以短逾時輪詢而不是無限等待：仍在執行就繼續等（維持背壓），一旦停止就脫身。
-        while (running) {
-            if (memoryBudget.tryAcquire(cost, 1, TimeUnit.SECONDS)) {
-                if (!running) {
-                    memoryBudget.release(cost)
-                    break
+        val cost = e.sizeBytes().coerceIn(1, limits.queueBytes)
+        var reserved = false
+        var interrupted = false
+        try {
+            // 位元組與筆數都必須有空間。只有成功入列才交出配額，停止時則自行歸還。
+            while (running) {
+                try {
+                    if (!reserved && !memoryBudget.tryAcquire(cost, SUBMIT_RETRY_MS, TimeUnit.MILLISECONDS)) continue
+                    reserved = true
+                    val accepted = synchronized(submissionLock) {
+                        running && queue.offer(e)
+                    }
+                    if (accepted) {
+                        reserved = false
+                        return
+                    }
+                    if (running) Thread.sleep(SUBMIT_RETRY_MS)
+                } catch (_: InterruptedException) {
+                    // Burp 執行緒的中斷也不能悄悄丟訊息；離開時恢復中斷旗標。
+                    interrupted = true
                 }
-                if (!queue.offer(e)) memoryBudget.release(cost)
-                return
             }
+            noteDiscardedAfterStop()
+        } finally {
+            if (reserved) memoryBudget.release(cost)
+            if (interrupted) Thread.currentThread().interrupt()
         }
-        noteDiscardedAfterStop()
     }
 
     /** 關閉期間丟掉的訊息數。這是唯一不會以 seq 缺號呈現的遺失，所以必須大聲講。 */
@@ -146,7 +193,8 @@ class RecordWriter(
      * 競爭同一份 HashMap。
      */
     fun stop() {
-        running = false
+        // 和最後一次 offer 共用鎖，保證 drain 開始後不會再有事件入列。
+        synchronized(submissionLock) { running = false }
         if (::thread.isInitialized) {
             thread.interrupt()
             try { thread.join(10_000) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
@@ -156,7 +204,10 @@ class RecordWriter(
     fun queueDepth(): Int = queue.size
 
     /** 佇列目前佔用的位元組，給 UI 顯示「本地吃了多少記憶體」。 */
-    fun queueBytes(): Int = MAX_QUEUE_BYTES - memoryBudget.availablePermits()
+    fun queueBytes(): Int = limits.queueBytes - memoryBudget.availablePermits()
+
+    /** 等待 response 的原始請求另有配額，不佔用 response 入列需要的空間。 */
+    fun pendingBytes(): Long = pendingRawBytes
 
     private fun loop() {
         while (running) {
@@ -182,30 +233,61 @@ class RecordWriter(
         try {
             handle(e)
         } finally {
-            memoryBudget.release(e.sizeBytes().coerceIn(1, MAX_QUEUE_BYTES))
+            memoryBudget.release(e.sizeBytes().coerceIn(1, limits.queueBytes))
         }
     }
 
     private fun drainRemaining() {
         val rest = ArrayList<CaptureEvent>()
         queue.drainTo(rest)
-        for (e in rest) try { consume(e) } catch (_: Throwable) {}
-        flushAllPending()
-        try {
-            flushWrites()
-        } catch (t: Throwable) {
-            logging.logToError(
-                "[es-logger] final flush failed — ${writeBuffer.size} record(s) were not stored: ${t.message}"
-            )
+        for (e in rest) try { consume(e) } catch (t: Throwable) {
+            logging.logToError("[es-logger] could not finalize a queued event during shutdown: ${t.message}")
         }
+        flushAllPending()
+        flushWrites(force = true)
+        reportBufferDrops(force = true)
     }
 
     private fun handle(e: CaptureEvent) {
         when (e) {
-            is RequestCaptured -> pending[e.messageId] = e.data
-            is ResponseCaptured -> finalizeHttp(pending.remove(e.messageId), e.data)
+            is RequestCaptured -> retainRequest(e)
+            is ResponseCaptured -> finalizeHttp(removePending(e.messageId), e.data)
             is WsCaptured -> finalizeWs(e)
         }
+    }
+
+    private fun removePending(messageId: Int): ReqData? = pending.remove(messageId)?.also {
+        pendingRawBytes -= it.raw.size
+    }
+
+    private fun retainRequest(e: RequestCaptured) {
+        // 若 Burp 重用 messageId，先保存舊請求，不能直接覆蓋。
+        removePending(e.messageId)?.let { finalizeHttp(it, null) }
+        val cost = e.data.raw.size.toLong()
+        if (cost > limits.pendingBytes) {
+            finalizeEarly(e.data)
+            return
+        }
+        while (pending.isNotEmpty() &&
+            (pendingRawBytes + cost > limits.pendingBytes || pending.size >= limits.pendingRequests)) {
+            val oldest = pending.entries.first()
+            val request = removePending(oldest.key)!!
+            finalizeEarly(request)
+        }
+        pending[e.messageId] = e.data
+        pendingRawBytes += cost
+    }
+
+    private fun finalizeEarly(request: ReqData) {
+        finalizeHttp(request, null)
+        earlyFinalizedRequests++
+        val now = System.currentTimeMillis()
+        if (now - lastPendingReport < DROP_REPORT_INTERVAL_MS) return
+        lastPendingReport = now
+        logging.logToOutput(
+            "[es-logger] pending request limit reached; saved $earlyFinalizedRequests request(s) " +
+                "without waiting for a response. Late responses are stored separately."
+        )
     }
 
     private fun sweepIfDue() {
@@ -219,16 +301,22 @@ class RecordWriter(
             val data = it.next().value
             if (data.ts.isBefore(cutoff)) {
                 it.remove()
+                pendingRawBytes -= data.raw.size
                 finalizeHttp(data, null)
             }
         }
     }
 
     private fun flushAllPending() {
-        if (pending.isEmpty()) return
-        val all = ArrayList(pending.values)
-        pending.clear()
-        for (d in all) finalizeHttp(d, null)
+        while (pending.isNotEmpty()) {
+            val oldest = pending.entries.first()
+            val request = removePending(oldest.key)!!
+            try {
+                finalizeHttp(request, null)
+            } catch (t: Throwable) {
+                logging.logToError("[es-logger] could not finalize a pending request during shutdown: ${t.message}")
+            }
+        }
     }
 
     // ---------- 落檔：HTTP ----------
@@ -247,8 +335,6 @@ class RecordWriter(
 
         val doc = baseDoc(resp?.ts ?: req?.ts ?: Instant.now(), seq, docId, type, req?.tool ?: "unknown")
 
-        var reqRawSha = ""
-        var reqBodySha = ""
         if (req != null) {
             // headers 只解碼一次，Content-Type 解析也共用同一份字串。
             val headText = String(req.raw, 0, req.bodyOffset, Charsets.ISO_8859_1)
@@ -256,8 +342,8 @@ class RecordWriter(
             val hashed = shouldHash(ex, req.bodyLength)
             // raw 一定算：它涵蓋 headers 與請求行，省掉的話被排除的那些紀錄
             // 連「當時送了什麼標頭」都無法舉證。極速模式只省另外一次 body 雜湊。
-            reqRawSha = Hashing.sha256Hex(req.raw)
-            if (hashed) reqBodySha = Hashing.sha256Hex(req.raw, req.bodyOffset, req.bodyLength)
+            val reqRawSha = Hashing.sha256Hex(req.raw)
+            val reqBodySha = if (hashed) Hashing.sha256Hex(req.raw, req.bodyOffset, req.bodyLength) else ""
 
             val o = JsonObject()
             o.addProperty("time", req.ts.toString())
@@ -272,16 +358,14 @@ class RecordWriter(
             doc.add("request", o)
         }
 
-        var respRawSha = ""
-        var respBodySha = ""
         if (resp != null) {
             val headText = String(resp.raw, 0, resp.bodyOffset, Charsets.ISO_8859_1)
             val ct = contentType(headText)
             // response body 用對應 request 的 URL 判斷副檔名
             val ex = exclusion(req?.url ?: "", ct)
             val hashed = shouldHash(ex, resp.bodyLength)
-            respRawSha = Hashing.sha256Hex(resp.raw)
-            if (hashed) respBodySha = Hashing.sha256Hex(resp.raw, resp.bodyOffset, resp.bodyLength)
+            val respRawSha = Hashing.sha256Hex(resp.raw)
+            val respBodySha = if (hashed) Hashing.sha256Hex(resp.raw, resp.bodyOffset, resp.bodyLength) else ""
 
             val o = JsonObject()
             o.addProperty("time", resp.ts.toString())
@@ -292,17 +376,7 @@ class RecordWriter(
             doc.add("response", o)
         }
 
-        // 身分欄位必須入鏈：稽核報告的主張是「這些流量是這位測試者在這個案子產生的」，
-        // 若 session / tester / project / host 不在 material 裡，在 ES 改掉它們不會破壞任何雜湊。
-        val material = listOf(
-            seq.toString(), docId, type,
-            sessionId, config.testerId, config.projectId, hostName,
-            req?.ts?.toString() ?: "", resp?.ts?.toString() ?: "",
-            req?.tool ?: "", req?.method ?: "", req?.url ?: "",
-            resp?.statusCode?.toString() ?: "",
-            reqRawSha, reqBodySha, respRawSha, respBodySha
-        )
-        writeRecord(seq, docId, prev, material, doc)
+        writeRecord(seq, docId, prev, doc)
     }
 
     // ---------- 落檔：WebSocket ----------
@@ -325,14 +399,7 @@ class RecordWriter(
         )
         doc.add("websocket", o)
 
-        val material = listOf(
-            seq.toString(), docId, "websocket",
-            sessionId, config.testerId, config.projectId, hostName,
-            e.ts.toString(), "",
-            e.tool, e.direction, e.url, e.isText.toString(),
-            payloadSha, "", "", ""
-        )
-        writeRecord(seq, docId, prev, material, doc)
+        writeRecord(seq, docId, prev, doc)
     }
 
     // ---------- 共用 ----------
@@ -344,47 +411,52 @@ class RecordWriter(
         doc.addProperty("doc_id", docId)
         doc.addProperty("session_id", sessionId)
         doc.addProperty("tester_id", config.testerId)
-        doc.addProperty("project_id", config.projectId)
+        doc.addProperty("project_id", projectId)
         doc.addProperty("capture_host", hostName)
         doc.addProperty("type", type)
         doc.addProperty("tool", tool)
         return doc
     }
 
-    private fun writeRecord(seq: Long, docId: String, prev: String, material: List<String>, doc: JsonObject) {
-        val recordHash = Hashing.recordHash(material, prev)
-        val integrity = JsonObject()
-        integrity.addProperty("algo", "sha256")
-        integrity.addProperty(
-            "scheme",
-            "record_sha256 = sha256(prev_hash || for each field: len(utf8) || ':' || field); " +
-                "fields = seq, doc_id, type, session_id, tester_id, project_id, capture_host, " +
-                "request.time, response.time, tool, request.method, request.url, response.status, " +
-                "request.raw_sha256, request.body_sha256, response.raw_sha256, response.body_sha256"
-        )
-        integrity.addProperty("prev_hash", prev)
-        integrity.addProperty("record_sha256", recordHash)
-        doc.add("integrity", integrity)
+    private fun writeRecord(seq: Long, docId: String, prev: String, doc: JsonObject) {
+        // v2 直接涵蓋實際儲存的完整文件，HTTP/WS 共用同一份格式，避免欄位清單漂移。
+        val recordHash = IntegrityV2.attach(doc, prev)
 
         val json = doc.toString()
-        writeBuffer.add(NewRecord(seq, docId, recordHash, json, json.toByteArray(Charsets.UTF_8).size))
+        val record = NewRecord(seq, docId, recordHash, json, json.toByteArray(Charsets.UTF_8).size)
+        writeBuffer.add(record)
+        writeBufferBytes += record.byteSize
         curSeq = seq
         curHash = recordHash
 
-        if (writeBuffer.size >= MAX_WRITE_BATCH) flushWrites()
+        if (writeBuffer.size >= limits.writeBatch || writeBufferBytes >= limits.bufferedBytes) flushWrites()
         capWriteBuffer()
     }
 
-    /** 寫入失敗時保留 buffer，下一輪重試；清空只在成功之後。 */
-    private fun flushWrites() {
-        if (writeBuffer.isEmpty()) return
-        // 先推進鏈尾再寫入。順序反過來的話，寫入持續失敗（磁碟滿、DB 被鎖）之後重載，
-        // 會從舊的鏈尾重新發出同一批 seq —— 同一個 seq 帶著不同內容出現兩次，
-        // 驗證時與遭人竄改無法區分。寧可留缺號，不可重號。
-        chainTip.saveChainTip(curSeq, curHash)
-        store.insertAll(writeBuffer)
-        writeBuffer.clear()
-        reportDroppedRecords()
+    /**
+     * spool 失敗不可以中斷 request 的收尾；保留有界 buffer，稍後再試。
+     * 即使 queue 已空也要等候，避免磁碟故障時在迴圈裡不停重試、洗滿 log。
+     */
+    private fun flushWrites(force: Boolean = false) {
+        if (writeBuffer.isEmpty() && !force) return
+        if (!force && nextWriteAttemptNanos != 0L && System.nanoTime() - nextWriteAttemptNanos < 0) return
+        try {
+            // 鏈尾先推進；即使 buffer 全被容量限制丟掉，也不能重用已消耗的 seq。
+            chainTip.saveChainTip(curSeq, curHash)
+            if (writeBuffer.isNotEmpty()) store.insertAll(writeBuffer)
+            writeBuffer.clear()
+            writeBufferBytes = 0
+            nextWriteAttemptNanos = 0
+            reportDroppedRecords()
+        } catch (t: Exception) {
+            nextWriteAttemptNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(limits.writeRetryMillis)
+            logging.logToError(
+                if (force) "[es-logger] final flush failed — ${writeBuffer.size} record(s) were not stored: ${t.message}"
+                else "[es-logger] local spool write failed; retaining records for retry: ${t.message}"
+            )
+        } finally {
+            capWriteBuffer()
+        }
     }
 
     /**
@@ -414,16 +486,29 @@ class RecordWriter(
      * 沒有背壓可用），最後吃光 Burp 的 heap。超過上限就丟最舊的，並且講出來。
      */
     private fun capWriteBuffer() {
-        if (writeBuffer.size <= MAX_BUFFERED_RECORDS) return
-        val overflow = writeBuffer.size - MAX_BUFFERED_RECORDS
-        repeat(overflow) { writeBuffer.removeAt(0) }
+        var overflow = 0
+        while (writeBuffer.size - overflow > limits.bufferedRecords || writeBufferBytes > limits.bufferedBytes) {
+            writeBufferBytes -= writeBuffer[overflow++].byteSize
+        }
+        if (overflow == 0) return
+        writeBuffer.subList(0, overflow).clear()
         bufferOverflowDropped += overflow
+        reportBufferDrops()
+    }
+
+    private fun reportBufferDrops(force: Boolean = false) {
+        val dropped = bufferOverflowDropped - lastBufferDroppedSeen
+        if (dropped == 0L) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastBufferDropReport < DROP_REPORT_INTERVAL_MS) return
+        lastBufferDropReport = now
+        lastBufferDroppedSeen = bufferOverflowDropped
         logging.logToError(
-            "[es-logger] the local spool keeps rejecting writes; dropped $overflow buffered record(s) " +
+            "[es-logger] the local spool keeps rejecting writes; dropped $dropped buffered record(s) " +
                 "($bufferOverflowDropped total) to protect Burp's heap"
         )
         logging.raiseCriticalEvent(
-            "ES Logger: dropped $overflow record(s) — the local spool is failing to accept writes"
+            "ES Logger: dropped $dropped record(s) — the local spool is failing to accept writes"
         )
     }
 
@@ -537,13 +622,7 @@ class RecordWriter(
     }
 
     private companion object {
-        /** 佇列的位元組上限（不是筆數）。滿了就擋住 Burp 的執行緒。 */
-        const val MAX_QUEUE_BYTES = 64 * 1024 * 1024
-        const val QUEUE_CAPACITY = 20_000
-        /** 一個 SQLite 交易最多累積幾筆；佇列一排空就會提前 flush。 */
-        const val MAX_WRITE_BATCH = 128
-        /** 本地儲存持續失敗時，buffer 最多累積幾筆。 */
-        const val MAX_BUFFERED_RECORDS = MAX_WRITE_BATCH * 10
+        const val SUBMIT_RETRY_MS = 100L
         /** 丟棄通報的最短間隔，避免積壓時洗版 Event log。 */
         const val DROP_REPORT_INTERVAL_MS = 30_000L
 

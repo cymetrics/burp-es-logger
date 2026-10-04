@@ -65,14 +65,22 @@ class Config(private val prefs: Preferences) : ChainTipStore {
      * 「開頭缺了一千筆」，而那正是這條鏈要用來偵測的徵狀。
      */
     override fun loadChainTip(): Pair<Long, String> =
-        (get(chainKey("seq"), "0").toLongOrNull() ?: 0L) to get(chainKey("hash"), Hashing.GENESIS)
+        chainTipFor(indexName()).loadChainTip()
 
     override fun saveChainTip(seq: Long, hash: String) {
-        set(chainKey("seq"), seq.toString())
-        set(chainKey("hash"), hash)
+        chainTipFor(indexName()).saveChainTip(seq, hash)
     }
 
-    private fun chainKey(suffix: String) = "chain.${indexName()}.$suffix"
+    /** Writer 固定使用啟動時的 index；儲存新設定不能改寫另一個專案的鏈尾。 */
+    fun chainTipFor(index: String): ChainTipStore = object : ChainTipStore {
+        override fun loadChainTip(): Pair<Long, String> =
+            (get("chain.$index.seq", "0").toLongOrNull() ?: 0L) to get("chain.$index.hash", Hashing.GENESIS)
+
+        override fun saveChainTip(seq: Long, hash: String) {
+            set("chain.$index.seq", seq.toString())
+            set("chain.$index.hash", hash)
+        }
+    }
 
     fun indexName(): String {
         val p = projectId.ifBlank { "default" }

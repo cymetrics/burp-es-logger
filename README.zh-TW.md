@@ -47,7 +47,7 @@ Burp 的專案檔不適合當封存：它是單一台機器上的二進位檔、
 3. **載入擴充** —— Burp → Extensions → Add → Extension type 選 **Java** → 選那個 jar，
    會多出 **ES Logger** 分頁。打算反覆重編就把 **Auto-reload** 打開。
 4. **填寫分頁** —— endpoint、API key、index 前綴、Tester ID、Project ID →
-   **儲存設定** → **測試連線**。那裡出現 403 是預期的且畫面會解釋；401 才是真的有問題。
+   **儲存設定** → 若變更專案／index，重新載入擴充 → **測試連線**。那裡出現 403 是預期的且畫面會解釋；401 才是真的有問題。
 
 ## 涵蓋範圍
 
@@ -84,7 +84,8 @@ export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080
 | 啟用自動上傳 | 開 | |
 | 落地到 SQLite | **關** | 開啟＝用磁碟換取跨重啟的完整性 |
 
-設定存在 Burp 的使用者偏好設定裡，跨專案共用。切換落地模式需要重載擴充，其餘存檔即生效。
+設定存在 Burp 的使用者偏好設定裡，跨專案共用。切換落地模式、index 前綴或 Project ID
+需要重載擴充；重載前擷取與上傳仍使用原專案。其他設定存檔即生效（WebSocket 註冊需重載）。
 
 ## 設計取捨
 
@@ -134,12 +135,16 @@ Elasticsearch 一確認就刪除。Burp 關閉或積壓超過上限時，未送�
   `raw_sha256` 仍涵蓋原始位元組。
 - hash chain 偵測竄改，但不能阻止竄改。**只刪尾端無法單靠 index 偵測** ——
   補救方式見[完整性](docs/integrity.md#what-this-does-and-does-not-prove)裡的外部錨點做法。
-- 測試途中更改 index 前綴或 Project ID，已擷取但未上傳的紀錄會被送到新的 index，
-  同一條鏈會被切成兩半。請在開始擷取之前就設定好。
+- 新紀錄使用 v2 格式，包含實際儲存的 body、headers 與 metadata；舊版紀錄僅能驗證原本
+  入鏈的欄位，無法追溯補強，詳見[完整性文件](docs/integrity.md)。
+- 更改 index 前綴或 Project ID 後，重載前仍使用原專案。SQLite 依 index 保留各自的
+  待送資料與鏈尾，切回原 index 才會繼續送出該專案的積壓。
+- 舊 SQLite 升級時須用原專案的鏈尾偏好設定確認歸屬；無法確認的紀錄會保留，
+  不會猜測目的地後上傳。詳見[升級復原](docs/troubleshooting.md#upgrading-an-existing-sqlite-spool)。
 
 ## 開發
 
-需要 JDK 17；Gradle 不支援 JDK 25 以上。
+需要 JDK 17 與 Python 3（測試會執行獨立驗證器）；Gradle 不支援 JDK 25 以上。
 
 ```bash
 JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew test shadowJar
