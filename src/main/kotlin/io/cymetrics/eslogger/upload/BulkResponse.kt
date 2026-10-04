@@ -11,6 +11,9 @@ import io.cymetrics.eslogger.storage.Pending
  */
 object BulkResponse {
 
+    /** 一批最多上萬筆，每筆都要比對；編譯一次就好。 */
+    private val HTTP_STATUS = Regex("[1-5][0-9]{2}")
+
     data class Rejected(val row: Pending, val status: Int, val reason: String)
 
     data class Result(
@@ -44,7 +47,7 @@ object BulkResponse {
             } ?: throw IllegalStateException("Bulk response is missing create result at item $i")
             val statusValue = create.get("status")
             check(statusValue != null && statusValue.isJsonPrimitive &&
-                statusValue.asJsonPrimitive.isNumber && statusValue.asString.matches(Regex("[1-5][0-9]{2}"))) {
+                statusValue.asJsonPrimitive.isNumber && statusValue.asString.matches(HTTP_STATUS)) {
                 "Bulk response is missing a valid status at item $i"
             }
             val status = statusValue.asInt

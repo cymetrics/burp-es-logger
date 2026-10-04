@@ -3,7 +3,7 @@
 以下指令用「管理權限」的 key（或 Kibana Dev Tools）執行一次即可。
 之後 Burp 端用產生的**最小權限 API key**，只能新增、不能讀 / 改 / 刪。
 
-設定變數：
+以下指令都在 repo 根目錄執行。設定變數：
 
 ```bash
 ES="https://<你的-serverless-endpoint>"      # 不要結尾斜線
@@ -16,7 +16,7 @@ ADMIN="ApiKey <管理用的-encoded-key>"          # 或改用 Kibana Dev Tools 
 curl -s -X PUT "$ES/_index_template/burp-log" \
   -H "Authorization: $ADMIN" \
   -H "Content-Type: application/json" \
-  --data-binary @index-template.json
+  --data-binary @elasticsearch/index-template.json
 ```
 
 ## 2. 建立最小權限 API key（Burp 端用這把）
@@ -42,7 +42,7 @@ curl -s -X PUT "$ES/_index_template/burp-log" \
 curl -s -X POST "$ES/_security/api_key" \
   -u "<user>:<pass>" \
   -H "Content-Type: application/json" \
-  --data-binary @api-key.json
+  --data-binary @elasticsearch/api-key.json
 ```
 
 回應會長這樣：
@@ -63,12 +63,12 @@ index template **只套用到之後新建的 index**。如果你已經在寫某�
 
 ```bash
 curl -s -X PUT "$ES/burp-log-<project_id>/_mapping" \
-  -H "Authorization: ApiKey $ADMIN_KEY" \
+  -H "Authorization: $ADMIN" \
   -H "Content-Type: application/json" \
   -d '{"properties":{
         "request":{"properties":{"hashes_skipped":{"type":"boolean"}}},
         "response":{"properties":{"hashes_skipped":{"type":"boolean"}}},
-        "websocket":{"properties":{"hashes_skipped":{"type":"boolean"}}},
+        "websocket":{"properties":{"hashes_skipped":{"type":"boolean"},"body_skip_reason":{"type":"keyword"}}},
         "integrity":{"properties":{"payload_sha256":{"type":"keyword"}}}
       }}'
 ```
@@ -85,7 +85,8 @@ curl -s -X PUT "$ES/burp-log-<project_id>/_mapping" \
 
 ## 4. index 命名與保留
 
-- 實際 index = `<前綴>-<project_id>`，例如 `burp-log-acme2025`（自動轉小寫、去除非法字元）。
+- 實際 index = `<前綴>-<project_id>`，例如 `burp-log-acme2025`（自動轉小寫，非法字元換成 `-`）。
+- 前綴請維持 `burp-log`：template 與 API key 只涵蓋 `burp-log-*`，其他前綴的上傳會一直收到 403。
 - 這是一般 index（非 data stream），採 client 端自訂 `_id` 以確保**重送不重複**。
 - 稽核用途通常要「保留到結案」，所以預設不自動刪除。
   要分月輪替可把 Project ID 設成含月份，或在管理端定期搬移 / 刪除舊 index。

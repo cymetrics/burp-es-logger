@@ -28,7 +28,7 @@ host with Repeater last Tuesday" is a query rather than an afternoon.
 - **Captures everything Burp sends.** Hooks `api.http()`, so Proxy, Repeater, Intruder, Scanner and
   other extensions are all covered — not just proxied browser traffic.
 - **Pairs requests with responses** by `messageId`. A request that never gets a response is still
-  written as `request_only` once it times out, so nothing silently disappears.
+  written as `http_request_only` once it times out, so nothing silently disappears.
 - **Decides what is worth storing.** Bodies are filtered by file extension and Content-Type and
   capped in size, so an index stays queryable instead of filling with PNG bytes. Excluded bodies
   still record their length and digest.
@@ -47,12 +47,12 @@ host with Repeater last Tuesday" is a query rather than an afternoon.
    ```
 2. **Prepare Elasticsearch** — [`elasticsearch/setup.md`](elasticsearch/setup.md) creates the index
    template and an append-only API key that can create documents but cannot read, overwrite or
-   delete them. [`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) is the same thing ready
-   to paste into Kibana's Dev Tools.
+   delete them. [`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) has the template and
+   mapping steps ready to paste into Kibana's Dev Tools; the API key still comes from `setup.md`.
 3. **Load the extension** — Burp → Extensions → Add → Extension type **Java** → select the jar. An
    **ES Logger** tab appears. Turn on **Auto-reload** if you plan to rebuild it.
 4. **Fill in the tab** — endpoint, API key, index prefix, tester ID, project ID → **Save settings**
-   → reload the extension if the project/index changed → **Test connection**. A 403 there is expected and explained; a 401 is not.
+   → reload the extension if the project/index changed → **Test connection**. It should report the key as valid; a 401 means the key is wrong or revoked.
 
 ## Scope
 
@@ -76,12 +76,12 @@ in the report rather than implying it is the whole of it.
 | Setting | Default | Notes |
 |---|---|---|
 | Endpoint | — | Full URL, no trailing slash |
-| API key (encoded) | — | Needs only `create_doc` on `burp-log-*` |
-| Index prefix | `burp-log` | Actual index is `<prefix>-<project id>` |
+| API key (encoded) | — | Needs only `create_doc` and `auto_configure` on `burp-log-*` |
+| Index prefix | `burp-log` | Actual index is `<prefix>-<project id>`. The template and API key cover `burp-log-*` only |
 | Tester / Project ID | — | Recorded on every document; project ID also names the index |
 | Excluded types | `js,gif,jpg,jpeg,png,ico,css,woff,woff2,ttf,svg` | Matched on both extension and Content-Type |
 | Max body size | 2 MB | Larger bodies keep a truncated slice plus the full length and digest |
-| Response timeout | 120 s | After this a request is written as `request_only` |
+| Response timeout | 120 s | After this a request is written as `http_request_only` |
 | Store bodies | on | Off keeps digests only |
 | Record WebSocket messages | on | |
 | Fast mode | **on** | Skips the body digest for excluded static assets; `raw_sha256` is always kept |
@@ -113,8 +113,8 @@ A document Elasticsearch rejects on its own merits would otherwise block every r
 such a batch is halved repeatedly to isolate it and the offender is dropped after three attempts,
 loudly: a critical event in Burp's dashboard, a counter in the tab, and the gap left in `seq`.
 
-**Fast mode skips the body digest for excluded static assets.** Images, fonts and CSS are the
-client's own content and are not stored anyway. `raw_sha256` is always computed, so the message as a
+**Fast mode skips the body digest for excluded static assets.** JS, CSS, images, icons and fonts
+are the client's own content and are not stored anyway. `raw_sha256` is always computed, so the message as a
 whole stays provable; only the standalone body digest is omitted, and the record is marked
 `hashes_skipped: true`.
 

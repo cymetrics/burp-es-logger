@@ -25,7 +25,7 @@ Burp 的專案檔不適合當封存：它是單一台機器上的二進位檔、
 
 - **涵蓋 Burp 送出的一切。** 掛在 `api.http()`，所以 Proxy、Repeater、Intruder、Scanner
   以及其他 extension 的流量都收得到，不只是瀏覽器經過 proxy 的部分。
-- **用 `messageId` 配對請求與回應。** 沒等到回應的請求逾時後仍以 `request_only` 落檔，
+- **用 `messageId` 配對請求與回應。** 沒等到回應的請求逾時後仍以 `http_request_only` 落檔，
   不會無聲消失。
 - **決定什麼值得保存。** body 依副檔名與 Content-Type 過濾並有大小上限，
   讓 index 維持在查得動的狀態。被排除的 body 仍會記錄長度與雜湊。
@@ -42,12 +42,12 @@ Burp 的專案檔不適合當封存：它是單一台機器上的二進位檔、
    ```
 2. **準備 Elasticsearch** —— 照 [`elasticsearch/setup.md`](elasticsearch/setup.md) 建立 index
    template，並產生一把只能新增、不能讀 / 改 / 刪的 API key。
-   [`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) 是同樣內容，可直接貼進 Kibana 的
-   Dev Tools。
+   [`elasticsearch/dev-tools.txt`](elasticsearch/dev-tools.txt) 收錄 template 與 mapping 步驟，
+   可直接貼進 Kibana 的 Dev Tools；API key 仍依 `setup.md` 建立。
 3. **載入擴充** —— Burp → Extensions → Add → Extension type 選 **Java** → 選那個 jar，
    會多出 **ES Logger** 分頁。打算反覆重編就把 **Auto-reload** 打開。
 4. **填寫分頁** —— endpoint、API key、index 前綴、Tester ID、Project ID →
-   **儲存設定** → 若變更專案／index，重新載入擴充 → **測試連線**。那裡出現 403 是預期的且畫面會解釋；401 才是真的有問題。
+   **儲存設定** → 若變更專案／index，重新載入擴充 → **測試連線**。正常會顯示金鑰有效；401 代表金鑰錯誤或已撤銷。
 
 ## 涵蓋範圍
 
@@ -70,12 +70,12 @@ export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080
 | 項目 | 預設 | 說明 |
 |---|---|---|
 | Endpoint | — | 完整網址，結尾不要斜線 |
-| API key (encoded) | — | 只需要 `burp-log-*` 的 `create_doc` 權限 |
-| Index 前綴 | `burp-log` | 實際 index 為 `<前綴>-<project id>` |
+| API key (encoded) | — | 只需要 `burp-log-*` 的 `create_doc` 與 `auto_configure` 權限 |
+| Index 前綴 | `burp-log` | 實際 index 為 `<前綴>-<project id>`；template 與 API key 只涵蓋 `burp-log-*` |
 | Tester / Project ID | — | 寫入每一筆文件；project ID 同時決定 index 名稱 |
 | 排除類型 | `js,gif,jpg,jpeg,png,ico,css,woff,woff2,ttf,svg` | 同時比對副檔名與 Content-Type |
 | body 上限 | 2 MB | 超出部分只留截斷片段 + 完整長度與雜湊 |
-| 回應逾時 | 120 秒 | 逾時後以 `request_only` 記錄 |
+| 回應逾時 | 120 秒 | 逾時後以 `http_request_only` 記錄 |
 | 保存 body | 開 | 關閉則只記雜湊 |
 | 記錄 WebSocket 訊息 | 開 | |
 | 極速模式 | **開** | 省掉被排除靜態資源的 body 雜湊；`raw_sha256` 一律保留 |

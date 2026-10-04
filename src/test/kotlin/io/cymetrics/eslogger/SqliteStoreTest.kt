@@ -180,6 +180,26 @@ class SqliteStoreTest {
     }
 
     @Test
+    fun `claiming an archive-era database lets later purges shrink the file`() = withDatabase { db ->
+        DriverManager.getConnection("jdbc:sqlite:$db").use { conn ->
+            conn.createStatement().use { st ->
+                st.execute("CREATE TABLE records(seq INTEGER PRIMARY KEY, doc_id TEXT, doc_json TEXT, created_at TEXT, record_sha256 TEXT, uploaded INTEGER)")
+                st.execute("INSERT INTO records VALUES(1,'uploaded-id','{\"project_id\":\"a\"}','2026-01-01','hash-1',1)")
+            }
+        }
+        withStore(db, "logs-a", 1L to "hash-1") { assertEquals(0, it.legacyPendingCount) }
+        // auto_vacuum 只能在建表前設定，或靠一次 VACUUM 套用；否則 purge 的 incremental_vacuum 永遠無效。
+        DriverManager.getConnection("jdbc:sqlite:$db").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("PRAGMA auto_vacuum").use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals(2, rs.getInt(1), "expected INCREMENTAL auto_vacuum after migration")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `conflicting migration rolls back and preserves both existing and legacy payloads`() = withDatabase { db ->
         legacyOutbox(db)
         withStore(db, "logs-a") { a ->

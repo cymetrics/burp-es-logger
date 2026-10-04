@@ -117,16 +117,29 @@ class SqliteStore(
                 )
             }
             val oldTip = legacyChainTip()
-            if (oldTip != null && oldTip.first > 0 && legacyTip == oldTip &&
-                legacyProjectId != null && legacyRowsMatchProject(legacyProjectId)) {
-                claimLegacy(oldTip)
-            }
+            val claimed = oldTip != null && oldTip.first > 0 && legacyTip == oldTip &&
+                legacyProjectId != null && legacyRowsMatchProject(legacyProjectId)
+            if (claimed) claimLegacy(oldTip)
             conn.commit()
+            if (claimed) reclaimSpace()
         } catch (t: Throwable) {
             conn.rollback()
             throw t
         } finally {
             conn.autoCommit = true
+        }
+    }
+
+    /**
+     * 舊表刪掉後做一次 VACUUM：封存時代的 DB 建立時沒有 auto_vacuum，之後每次 purge 的
+     * incremental_vacuum 都不會生效，檔案會永遠停在舊表的大小。VACUUM 不能在交易裡跑，
+     * 所以放在 commit 之後；失敗只影響檔案大小，不影響資料。
+     */
+    private fun reclaimSpace() {
+        conn.autoCommit = true
+        try {
+            conn.createStatement().use { it.execute("VACUUM") }
+        } catch (_: Exception) {
         }
     }
 

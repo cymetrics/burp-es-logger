@@ -72,8 +72,9 @@ integers, arrays, booleans and decimal number forms.
 Stop capture and finish uploading before verification, or export a stable snapshot.
 The live Elasticsearch reader assumes **one writer chain per index** and sequences
 that are unique within that index. Independent Burp installations must use separate
-project/index names. Concurrent capture and multiple independent writers in one
-index are not supported by this verifier's `search_after` reader.
+project/index names. The reader pages by `seq` with `doc_id` as a tie-breaker, so
+duplicate sequences are reported rather than skipped, but concurrent capture and
+multiple independent writers in one index are not supported.
 
 ```bash
 # Directly from Elasticsearch, using a key that can read the index

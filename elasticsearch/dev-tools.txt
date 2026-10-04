@@ -1,5 +1,5 @@
 # Kibana → Dev Tools 貼這份就好（以你的登入身分執行，不需要 API key）
-# 兩段都選起來按右上角的執行箭頭，或各自把游標放進去按 Ctrl/Cmd + Enter
+# 三段都選起來按右上角的執行箭頭，或各自把游標放進去按 Ctrl/Cmd + Enter
 
 # 1. 更新 index template（只影響「之後新建」的 index）
 PUT _index_template/burp-log

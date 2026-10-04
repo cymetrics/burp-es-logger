@@ -10,12 +10,12 @@ import io.cymetrics.eslogger.storage.ChainTipStore
  * 注意：API key 會以明文存在 Burp 的使用者偏好設定中。測試機請做磁碟加密，
  * 案件結束後清除。
  */
-class Config(private val prefs: Preferences) : ChainTipStore {
+class Config(private val prefs: Preferences) {
 
     // --- Elasticsearch ---
     @Volatile var esEndpoint: String = get("es.endpoint", "")              // 例如 https://xxx.es.region.aws.elastic.cloud
     @Volatile var esApiKey: String = get("es.apikey", "")                  // Kibana 產生的 encoded api key
-    @Volatile var indexPrefix: String = get("es.indexPrefix", "burp-log")  // 實際 index = <prefix>-<project>
+    @Volatile var indexPrefix: String = get("es.indexPrefix", DEFAULT_INDEX_PREFIX)  // 實際 index = <prefix>-<project>
 
     // --- 稽核識別 ---
     @Volatile var testerId: String = get("audit.tester", "")
@@ -63,15 +63,10 @@ class Config(private val prefs: Preferences) : ChainTipStore {
      * 每個案子一個。若共用同一個鏈尾，換個 Project ID 之後新 index 的第一筆會宣稱
      * seq 1001、prev_hash 指向一筆只存在於另一個 index 的紀錄 —— 驗證時看起來就是
      * 「開頭缺了一千筆」，而那正是這條鏈要用來偵測的徵狀。
+     *
+     * 刻意只提供「指定 index」的版本。跟著 [indexName] 走的鏈尾在使用者儲存新的
+     * Project ID 之後會悄悄指向另一個專案，而 writer 仍在寫原本那條鏈。
      */
-    override fun loadChainTip(): Pair<Long, String> =
-        chainTipFor(indexName()).loadChainTip()
-
-    override fun saveChainTip(seq: Long, hash: String) {
-        chainTipFor(indexName()).saveChainTip(seq, hash)
-    }
-
-    /** Writer 固定使用啟動時的 index；儲存新設定不能改寫另一個專案的鏈尾。 */
     fun chainTipFor(index: String): ChainTipStore = object : ChainTipStore {
         override fun loadChainTip(): Pair<Long, String> =
             (get("chain.$index.seq", "0").toLongOrNull() ?: 0L) to get("chain.$index.hash", Hashing.GENESIS)
@@ -82,17 +77,22 @@ class Config(private val prefs: Preferences) : ChainTipStore {
         }
     }
 
-    fun indexName(): String {
-        val p = projectId.ifBlank { "default" }
-        return sanitizeIndex("$indexPrefix-$p")
-    }
+    fun indexName(): String = indexNameFor(indexPrefix, projectId)
 
     fun save() {
-        set("es.endpoint", esEndpoint.trim().trimEnd('/'))
-        set("es.apikey", esApiKey.trim())
-        set("es.indexPrefix", indexPrefix.trim())
-        set("audit.tester", testerId.trim())
-        set("audit.project", projectId.trim())
+        // 先正規化記憶體裡的值再寫出。只 trim 寫出去的那份的話，indexName() 與 tester_id
+        // 會沿用帶空白的值直到重載：狀態列誤報「重載後套用另一個 index」，同一案件的
+        // 紀錄也會出現兩種 tester_id 寫法。
+        esEndpoint = esEndpoint.trim().trimEnd('/')
+        esApiKey = esApiKey.trim()
+        indexPrefix = indexPrefix.trim()
+        testerId = testerId.trim()
+        projectId = projectId.trim()
+        set("es.endpoint", esEndpoint)
+        set("es.apikey", esApiKey)
+        set("es.indexPrefix", indexPrefix)
+        set("audit.tester", testerId)
+        set("audit.project", projectId)
         set("capture.excludedExt", excludedExtensions.joinToString(","))
         setBool("capture.ws", captureWebSockets)
         setBool("capture.fastMode", fastMode)
@@ -105,8 +105,6 @@ class Config(private val prefs: Preferences) : ChainTipStore {
         set("ui.lang", uiLang)
         setBool("storage.persistLocal", persistLocally)
         set("storage.dbPath", dbPath)
-        // 存回去的字串要同步 trim，避免 UI 讀到舊值
-        esEndpoint = esEndpoint.trim().trimEnd('/')
     }
 
     private fun get(k: String, default: String): String = prefs.getString(k) ?: default
@@ -117,6 +115,16 @@ class Config(private val prefs: Preferences) : ChainTipStore {
     private fun setBool(k: String, v: Boolean) = prefs.setBoolean(k, v)
 
     companion object {
+        const val DEFAULT_INDEX_PREFIX = "burp-log"
+
+        /**
+         * 設定面板的預覽與實際寫入共用這一個函式。兩邊各自組字串的話，前綴留空時預覽顯示
+         * burp-log-<project>，實際卻寫進 <project> —— 那不符合 index template 與 API key 的
+         * burp-log-* 範圍，上傳會一直 403。
+         */
+        fun indexNameFor(prefix: String, project: String): String =
+            sanitizeIndex("${prefix.trim().ifBlank { DEFAULT_INDEX_PREFIX }}-${project.trim().ifBlank { "default" }}")
+
         fun sanitizeIndex(raw: String): String =
             raw.lowercase()
                 .replace(Regex("[^a-z0-9._-]"), "-")

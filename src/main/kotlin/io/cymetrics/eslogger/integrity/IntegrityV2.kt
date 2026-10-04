@@ -122,6 +122,6 @@ object IntegrityV2 {
         }
 
         encode(doc, root = true)
-        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return Hashing.toHex(digest.digest())
     }
 }

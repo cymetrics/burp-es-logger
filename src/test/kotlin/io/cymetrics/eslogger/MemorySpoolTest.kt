@@ -17,6 +17,17 @@ class MemorySpoolTest {
         NewRecord(seq, "doc-$seq", "hash-$seq", payload, payload.toByteArray(Charsets.UTF_8).size)
 
     @Test
+    fun `a record larger than the whole budget is dropped alone instead of emptying the spool`() {
+        val spool = MemorySpool(maxBytes = 100)
+
+        spool.insertAll(listOf(record(1), record(2, "x".repeat(200)), record(3)))
+
+        assertEquals(listOf(1L, 3L), spool.pendingBatch(10).map { it.seq })
+        assertEquals(1, spool.droppedCount)
+        assertEquals(3, spool.lastSeq, "the dropped record's seq is still consumed")
+    }
+
+    @Test
     fun `inserting advances the chain tip and the pending count`() {
         val spool = MemorySpool()
 

@@ -138,9 +138,11 @@ def fetch_from_elasticsearch(endpoint: str, api_key: str, index: str):
     url = f"{endpoint.rstrip('/')}/{index}/_search"
     after = None
     while True:
-        body = {"size": 1000, "sort": [{"seq": "asc"}], "query": {"match_all": {}}}
+        # doc_id breaks ties. With seq alone, search_after skips every remaining document
+        # that shares the last seq of a page -- exactly the duplicates this tool must report.
+        body = {"size": 1000, "sort": [{"seq": "asc"}, {"doc_id": "asc"}], "query": {"match_all": {}}}
         if after is not None:
-            body["search_after"] = [after]
+            body["search_after"] = after
         request = urllib.request.Request(
             url, data=json.dumps(body).encode(),
             headers={"Authorization": f"ApiKey {api_key}", "Content-Type": "application/json"},
@@ -154,7 +156,7 @@ def fetch_from_elasticsearch(endpoint: str, api_key: str, index: str):
             return
         for hit in hits:
             yield hit["_source"]
-        after = hits[-1]["_source"]["seq"]
+        after = hits[-1]["sort"]
 
 
 def verify(documents, *, strict=False, require_v2=False) -> int:

@@ -184,10 +184,13 @@ class SettingsPanel(
     }
 
     private fun showInitialStatus() {
-        if (config.esEndpoint.isBlank() || config.esApiKey.isBlank()) {
+        if (config.persistLocally && store.kind == SpoolKind.MEMORY) {
+            // 設定要求落地，實際卻是記憶體：SQLite 開不起來，ExtensionMain 已退回記憶體 spool。
+            setStatus(Tone.WARN) { it.statusSpoolFallback }
+        } else if (config.esEndpoint.isBlank() || config.esApiKey.isBlank()) {
             setStatus(Tone.WARN) { it.statusNotConfigured }
         } else {
-            setStatus(Tone.IDLE) { it.loaded(config.indexName()) }
+            setStatus(Tone.IDLE) { it.loaded(uploader.targetIndex) }
         }
     }
 
@@ -327,6 +330,10 @@ class SettingsPanel(
                         ElasticUploader.FlushResult.BUSY ->
                             Tone.IDLE to { st: Strings -> st.statusUploadBusy }
                     }
+                } catch (p: ElasticUploader.PartialUploadException) {
+                    val accepted = p.accepted
+                    val msg = p.message
+                    Tone.WARN to { st: Strings -> st.uploadPartial(accepted, msg) }
                 } catch (t: Throwable) {
                     val msg = t.message
                     Tone.ERR to { st: Strings -> st.uploadFailed(msg) }
@@ -476,9 +483,7 @@ class SettingsPanel(
     }
 
     private fun updateDerivedLabels() {
-        val prefix = tfIndexPrefix.text.trim().ifBlank { "burp-log" }
-        val project = tfProject.text.trim().ifBlank { "default" }
-        lblIndexPreview.text = s.targetIndex(Config.sanitizeIndex("$prefix-$project"))
+        lblIndexPreview.text = s.targetIndex(Config.indexNameFor(tfIndexPrefix.text, tfProject.text))
 
         val bytes = tfMaxBody.text.trim().toLongOrNull()
         lblBodyHint.text = if (bytes == null) s.numberRequired else s.bodyHint(bytes / 1024.0 / 1024.0)

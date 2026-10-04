@@ -2,7 +2,6 @@ package io.cymetrics.eslogger.upload
 
 import burp.api.montoya.logging.Logging
 import io.cymetrics.eslogger.config.Config
-import io.cymetrics.eslogger.storage.NewRecord
 import io.cymetrics.eslogger.storage.Pending
 import io.cymetrics.eslogger.storage.RecordSpool
 import com.google.gson.JsonParser
@@ -29,10 +28,10 @@ class ElasticUploader(
     private val config: Config,
     private val store: RecordSpool,
     private val logging: Logging,
-    private val http: HttpClient = createHttpClient()
-) {
+    private val http: HttpClient = createHttpClient(),
     /** 目的 index 在本次載入期間固定，避免待送資料因設定變更而移到其他專案。 */
     val targetIndex: String = config.indexName()
+) {
 
     @Volatile private var running = false
     private lateinit var thread: Thread
@@ -82,6 +81,13 @@ class ElasticUploader(
         while (store.pendingCount > 0 && System.currentTimeMillis() < deadline) {
             try {
                 if (flushOnce() != FlushResult.SENT) break
+            } catch (p: PartialUploadException) {
+                // ES 仍在收：已確認的已清掉，被退回的下一輪再試。若在這裡停手，一筆被節流的
+                // 文件就會讓純記憶體模式在卸載時丟掉其餘整個佇列。一筆都沒進去才放棄。
+                if (p.accepted == 0) {
+                    logging.logToError("[es-logger] final upload attempt failed: ${p.message}")
+                    break
+                }
             } catch (t: Throwable) {
                 logging.logToError("[es-logger] final upload attempt failed: ${t.message}")
                 break
@@ -130,14 +136,16 @@ class ElasticUploader(
         }
     }
 
-    /**
-     * 嘗試送出一批。回傳 true 表示這輪有送出資料（可能還有更多待送）。
-     *
-     * 呼叫端的 loop 在回傳 true 時不會 sleep，所以積壓會被連續的 _bulk 排掉，
-     * `uploadIntervalSeconds` 只是閒置時的輪詢週期，不是吞吐上限。
-     */
     /** flushOnce 的結果。「沒東西可送」和「別人正在送」必須分得出來。 */
     enum class FlushResult { SENT, EMPTY, BUSY }
+
+    /**
+     * 這一批有 [accepted] 筆已確認進 ES 並從本地清掉，其餘被退回、留待重送。
+     *
+     * 對背景迴圈這仍是失敗（要進入退避）；但卸載前的 drain 與「立即上傳」按鈕必須分得出
+     * 「ES 仍在收」與「完全送不出去」，所以用專屬型別而不是一般例外。
+     */
+    class PartialUploadException(val accepted: Int, message: String) : IllegalStateException(message)
 
     private val flushLock = java.util.concurrent.locks.ReentrantLock()
 
@@ -156,6 +164,12 @@ class ElasticUploader(
         }
     }
 
+    /**
+     * 嘗試送出一批。回傳 true 表示這輪有送出資料（可能還有更多待送）。
+     *
+     * 呼叫端的 loop 在回傳 true 時不會 sleep，所以積壓會被連續的 _bulk 排掉，
+     * `uploadIntervalSeconds` 只是閒置時的輪詢週期，不是吞吐上限。
+     */
     private fun flushBatch(): Boolean {
         val limit = if (batchLimitOverride > 0) minOf(batchLimitOverride, config.uploadBatchSize)
         else config.uploadBatchSize
@@ -272,7 +286,7 @@ class ElasticUploader(
             "${batch.size - succeeded.size}/${batch.size} documents rejected — see the Extensions log"
 
         // 部分成功先安全清除已確認項目，再讓背景 loop 進入同一套 exponential backoff。
-        if (needsRetry) throw IllegalStateException(lastError)
+        if (needsRetry) throw PartialUploadException(succeeded.size, lastError)
         if (bulkByteLimit < MAX_BULK_BYTES) bulkByteLimit = (bulkByteLimit * 2).coerceAtMost(MAX_BULK_BYTES)
         return true
     }

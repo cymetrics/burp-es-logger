@@ -192,7 +192,7 @@ class RecordWriterBoundsTest {
             awaitCondition { writer.bufferOverflowDropped == 7L }
         } finally { writer.stop() }
         assertEquals(listOf(8L, 9L, 10L), spool.attempts.last().map { it.seq })
-        assertEquals(10L, config.loadChainTip().first)
+        assertEquals(10L, config.chainTipFor(writer.targetIndex).loadChainTip().first)
         assertTrue(logging.events.any { it.startsWith("CRITICAL") && "dropped" in it })
         assertTrue(logging.errors.any { "final flush failed" in it })
     }
@@ -207,9 +207,28 @@ class RecordWriterBoundsTest {
             writer.submit(ws(ByteArray(4096) { 'x'.code.toByte() }))
             awaitCondition { writer.bufferOverflowDropped == 1L }
         } finally { writer.stop() }
-        assertEquals(1L, config.loadChainTip().first)
+        assertEquals(1L, config.chainTipFor(writer.targetIndex).loadChainTip().first)
         assertEquals(1, spool.attempts.size, "shutdown should not retain the oversized document")
         assertTrue(spool.attempts.single().single().byteSize > 4096)
+    }
+
+    @Test
+    fun `an oversized record dropped during write backoff keeps older records and advances the tip`() {
+        val spool = ProbeSpool(fail = true)
+        val config = testConfig()
+        val writer = RecordWriter(config, spool, FakeLogging(), RecordWriter.Limits(
+            writeBatch = 1, bufferedBytes = 4096, writeRetryMillis = 60_000
+        ))
+        writer.start()
+        try {
+            writer.submit(ws())
+            awaitCondition { spool.attempts.size == 1 }   // seq 1 失敗，下次重試在 60 秒後
+            writer.submit(ws(ByteArray(8192) { 'x'.code.toByte() }))
+            awaitCondition { writer.bufferOverflowDropped == 1L }
+            // 還沒關閉就要越過被丟掉的 seq 2；此時當機的話，重啟不能重新發出 seq 2。
+            assertEquals(2L, config.chainTipFor(writer.targetIndex).loadChainTip().first)
+        } finally { writer.stop() }
+        assertEquals(listOf(1L), spool.attempts.last().map { it.seq }, "the older record must survive")
     }
 
     @Test
@@ -239,7 +258,7 @@ class RecordWriterBoundsTest {
         writer.start()
         repeat(10) { writer.submit(request(it)) }
         writer.stop()
-        assertEquals(10L, config.loadChainTip().first, "every pending request must receive a seq")
+        assertEquals(10L, config.chainTipFor(writer.targetIndex).loadChainTip().first, "every pending request must receive a seq")
         assertEquals(7L, writer.bufferOverflowDropped)
         assertEquals(listOf(8L, 9L, 10L), spool.attempts.last().map { it.seq })
         assertTrue(logging.errors.any { "final flush failed" in it })

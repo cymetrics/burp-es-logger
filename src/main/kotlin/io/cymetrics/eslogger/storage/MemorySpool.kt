@@ -38,6 +38,12 @@ class MemorySpool(private val maxBytes: Long = DEFAULT_MAX_BYTES) : RecordSpool 
     override fun insertAll(records: List<NewRecord>) = synchronized(lock) {
         if (records.isEmpty()) return@synchronized
         for (r in records) {
+            // 單筆就超過整個上限：只丟它。先放進去再丟最舊的話，它會把整個佇列擠空，
+            // 最後自己也留不住。
+            if (r.byteSize > maxBytes) {
+                droppedCount++
+                continue
+            }
             queue.addLast(Pending(r.seq, r.docId, r.docJson, r.byteSize))
             bytes += r.byteSize.toLong()
         }

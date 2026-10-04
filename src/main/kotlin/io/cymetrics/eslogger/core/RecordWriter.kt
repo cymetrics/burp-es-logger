@@ -37,10 +37,12 @@ class RecordWriter internal constructor(
     private val config: Config,
     private val store: RecordSpool,
     private val logging: Logging,
-    private val limits: Limits
+    private val limits: Limits,
+    /** 鏈尾的權威來源。Config 依目標 index 分開保存，所以換案子等於換一條鏈。 */
+    val targetIndex: String = config.indexName()
 ) {
-    constructor(config: Config, store: RecordSpool, logging: Logging) :
-        this(config, store, logging, Limits())
+    constructor(config: Config, store: RecordSpool, logging: Logging, targetIndex: String = config.indexName()) :
+        this(config, store, logging, Limits(), targetIndex)
 
     internal data class Limits(
         val queueBytes: Int = 64 * 1024 * 1024,
@@ -60,8 +62,6 @@ class RecordWriter internal constructor(
         }
     }
 
-    /** 鏈尾的權威來源。Config 依目標 index 分開保存，所以換案子等於換一條鏈。 */
-    val targetIndex: String = config.indexName()
     val projectId: String = config.projectId
     private val chainTip: ChainTipStore = config.chainTipFor(targetIndex)
     private val queue: BlockingQueue<CaptureEvent> = ArrayBlockingQueue(limits.queueCapacity)
@@ -74,7 +74,11 @@ class RecordWriter internal constructor(
         private set
     private var lastPendingReport = 0L
     private val sessionId = UUID.randomUUID().toString()
-    private val hostName: String = try { InetAddress.getLocalHost().hostName } catch (_: Exception) { "unknown" }
+    // 延到 writer 執行緒第一次用到才查。macOS 的主機名稱解析不到時這裡會卡約 5 秒，
+    // 放在建構子就等於卡住 Burp 載入擴充。
+    private val hostName: String by lazy {
+        try { InetAddress.getLocalHost().hostName } catch (_: Exception) { "unknown" }
+    }
 
     // hash chain 狀態：只有 writer thread 碰。
     //
@@ -338,7 +342,8 @@ class RecordWriter internal constructor(
         if (req != null) {
             // headers 只解碼一次，Content-Type 解析也共用同一份字串。
             val headText = String(req.raw, 0, req.bodyOffset, Charsets.ISO_8859_1)
-            val ex = exclusion(req.url, contentType(headText))
+            val ct = contentType(headText)
+            val ex = exclusion(req.url, ct)
             val hashed = shouldHash(ex, req.bodyLength)
             // raw 一定算：它涵蓋 headers 與請求行，省掉的話被排除的那些紀錄
             // 連「當時送了什麼標頭」都無法舉證。極速模式只省另外一次 body 雜湊。
@@ -353,7 +358,7 @@ class RecordWriter internal constructor(
             o.addProperty("port", req.port)
             o.addProperty("secure", req.secure)
             o.addProperty("headers", headText)
-            addBody(o, req.raw, req.bodyOffset, req.bodyLength, reqBodySha, hashed, ex, contentType(headText))
+            addBody(o, req.raw, req.bodyOffset, req.bodyLength, reqBodySha, hashed, ex, ct)
             o.addProperty("raw_sha256", reqRawSha)
             doc.add("request", o)
         }
@@ -484,15 +489,36 @@ class RecordWriter internal constructor(
     /**
      * 寫入持續失敗時 buffer 會一直長大（記憶體配額在 consume 的 finally 已經放掉了，
      * 沒有背壓可用），最後吃光 Burp 的 heap。超過上限就丟最舊的，並且講出來。
+     *
+     * 單筆就超過整個位元組預算的紀錄先單獨丟掉：照「最舊先丟」的話，它會先把其他
+     * 所有紀錄擠出去，最後自己也留不住 —— 一筆大回應就清空整個 buffer。
      */
     private fun capWriteBuffer() {
+        var dropped = 0
+        val oversized = writeBuffer.iterator()
+        while (oversized.hasNext()) {
+            val record = oversized.next()
+            if (record.byteSize > limits.bufferedBytes) {
+                oversized.remove()
+                writeBufferBytes -= record.byteSize
+                dropped++
+            }
+        }
         var overflow = 0
         while (writeBuffer.size - overflow > limits.bufferedRecords || writeBufferBytes > limits.bufferedBytes) {
             writeBufferBytes -= writeBuffer[overflow++].byteSize
         }
-        if (overflow == 0) return
         writeBuffer.subList(0, overflow).clear()
-        bufferOverflowDropped += overflow
+        dropped += overflow
+        if (dropped == 0) return
+        bufferOverflowDropped += dropped
+        // 被丟掉的 seq 已經發出去了，鏈尾必須越過它們。退避期間 flushWrites 不會寫鏈尾，
+        // 若此時當機，重啟後會重新發出同樣的 seq，這段遺失在 index 裡就不留缺號。
+        try {
+            chainTip.saveChainTip(curSeq, curHash)
+        } catch (t: Exception) {
+            logging.logToError("[es-logger] could not persist the chain tip after dropping records: ${t.message}")
+        }
         reportBufferDrops()
     }
 

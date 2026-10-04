@@ -17,7 +17,7 @@ object Hashing {
 
     fun sha256Hex(data: String): String = sha256Hex(data.toByteArray(Charsets.UTF_8))
 
-    private fun toHex(bytes: ByteArray): String {
+    internal fun toHex(bytes: ByteArray): String {
         val out = CharArray(bytes.size * 2)
         for (i in bytes.indices) {
             val v = bytes[i].toInt() and 0xff

@@ -43,9 +43,10 @@ GET burp-log-demo/_search
 }
 ```
 
-## Which records cannot be evidenced
+## Which records have no body digest
 
-Fast mode marks the messages whose body digest was skipped:
+Fast mode marks the messages whose separate body digest was skipped. `raw_sha256` still covers the
+whole message:
 
 ```
 GET burp-log-demo/_count

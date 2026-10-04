@@ -23,9 +23,11 @@ import javax.net.ssl.SSLParameters
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 
 class ElasticUploaderTest {
-    private class StubHttp(var body: String) : HttpClient() {
+    /** [respond] 依實際送出的 _bulk 內容決定回應；未提供時一律回 [body]。 */
+    private class StubHttp(var body: String, val respond: ((String) -> String)? = null) : HttpClient() {
         var sentBody = ""
         override fun cookieHandler(): Optional<CookieHandler> = Optional.empty()
         override fun connectTimeout(): Optional<Duration> = Optional.empty()
@@ -49,8 +51,9 @@ class ElasticUploaderTest {
                 override fun onError(error: Throwable) { throw AssertionError(error) }
                 override fun onComplete() { sentBody = bytes.toString(Charsets.UTF_8) }
             })
+            val reply = respond?.invoke(sentBody) ?: body
             return Proxy.newProxyInstance(javaClass.classLoader, arrayOf(HttpResponse::class.java)) { _, method, _ ->
-                when (method.name) { "statusCode" -> 200; "body" -> body; else -> null }
+                when (method.name) { "statusCode" -> 200; "body" -> reply; else -> null }
             } as HttpResponse<T>
         }
         override fun <T> sendAsync(request: HttpRequest, handler: HttpResponse.BodyHandler<T>): CompletableFuture<HttpResponse<T>> =
@@ -108,12 +111,31 @@ class ElasticUploaderTest {
         val spool = spool(3)
         val http = StubHttp(response(201, 429, 409))
         val uploader = uploader(spool, http)
-        assertFails { uploader.flushOnce() }
+        val partial = assertFailsWith<ElasticUploader.PartialUploadException> { uploader.flushOnce() }
+        assertEquals(2, partial.accepted)
         assertEquals(listOf("doc-2"), spool.pendingBatch(10).map { it.docId })
         assertEquals(2L, uploader.uploadedTotal)
         http.body = response(201)
         assertEquals(ElasticUploader.FlushResult.SENT, uploader.flushOnce())
         assertEquals(0L, spool.pendingCount)
+        assertEquals(3L, uploader.uploadedTotal)
+    }
+
+    @Test
+    fun `unload drain keeps sending after a partially rejected batch`() {
+        val spool = spool(4)
+        // doc-1 每次都被節流，其餘都收下。舊行為在第一個部分失敗就停手，doc-3、doc-4 卸載時遺失。
+        val http = StubHttp("") { sent ->
+            val ids = sent.lineSequence().filter { it.startsWith("{\"create\"") }
+                .map { com.google.gson.JsonParser.parseString(it).asJsonObject.getAsJsonObject("create")["_id"].asString }
+                .toList()
+            """{"items":[${ids.joinToString(",") { item(if (it == "doc-1") 429 else 201) }}]}"""
+        }
+        val config = testConfig().apply { esEndpoint = "https://unused.invalid"; esApiKey = "test-only"; uploadBatchSize = 2 }
+        val uploader = ElasticUploader(config, spool, FakeLogging(), http)
+
+        assertEquals(1L, uploader.drainBeforeExit(5_000))
+        assertEquals(listOf("doc-1"), spool.pendingBatch(10).map { it.docId })
         assertEquals(3L, uploader.uploadedTotal)
     }
 

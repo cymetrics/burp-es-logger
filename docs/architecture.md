@@ -41,10 +41,10 @@ processing can temporarily hold an oversized message or document, and the SQLite
 |---|---|---|
 | Capture queue | 64 MiB raw bytes + estimated overhead, or 20,000 events | Blocks the Burp thread at either limit |
 | Pending requests | 64 MiB raw bytes or 20,000 requests | Finalizes oldest requests as request-only; late responses are recorded separately |
-| Write buffer | 32 MiB serialized UTF-8 or 1,280 records | Drops oldest, counts them, raises a critical event |
-| Memory spool | 32 MB | Drops oldest, counts them, raises a critical event |
+| Write buffer | 32 MiB serialized UTF-8 or 1,280 records | Drops oldest, counts them, raises a critical event; a single record larger than the whole budget is dropped alone |
+| Memory spool | 32 MiB | Drops oldest, counts them, raises a critical event; a single record larger than the whole budget is dropped alone |
 | `_bulk` request | 8 MiB, reduced on 413 | Reads SQLite incrementally within a byte budget; an oversized first record is attempted alone |
-| SQLite spool | Disk | Grows with the backlog; WAL truncated at 8 MB |
+| SQLite spool | Disk | Grows with the backlog; the WAL is truncated back to 8 MiB after checkpoints |
 
 Pending-request pressure does not discard requests: it finalizes them early and reports the change.
 Spool write failures retain a bounded buffer and retry with at least a one-second cooldown.

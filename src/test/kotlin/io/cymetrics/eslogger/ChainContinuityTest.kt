@@ -43,7 +43,7 @@ class ChainContinuityTest {
         val doc = JsonParser.parseString(spool.written.single().docJson).asJsonObject
         assertEquals("acme", doc["project_id"].asString)
         assertEquals("burp-log-acme", writer.targetIndex)
-        assertEquals(0L, config.loadChainTip().first)
+        assertEquals(0L, config.chainTipFor(config.indexName()).loadChainTip().first)
         assertEquals(1L, config.chainTipFor("burp-log-acme").loadChainTip().first)
     }
 

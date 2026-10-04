@@ -146,6 +146,33 @@ class VerifyChainTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "incomplete search"):
                         list(verifier.fetch_from_elasticsearch("https://example.test", "fake", "test-index"))
 
+    def test_elasticsearch_paging_keeps_duplicate_sequences_at_a_page_boundary(self):
+        first = v2_document()
+        twin = v2_document()
+        twin["doc_id"] = "test-1-twin"
+        second = v2_document(2, first["integrity"]["record_sha256"])
+        requests = []
+
+        def search(request, timeout):
+            # Emulate Elasticsearch: order by the requested sort fields only, and return
+            # the documents strictly after search_after, one per page.
+            body = json.loads(request.data)
+            requests.append(body)
+            fields = [next(iter(clause)) for clause in body["sort"]]
+            keyed = sorted(((tuple(doc[f] for f in fields), doc) for doc in (first, twin, second)),
+                           key=lambda pair: pair[0])
+            after = tuple(body.get("search_after", ()))
+            page = [{"_source": doc, "sort": list(key)} for key, doc in keyed if not after or key > after]
+            return io.BytesIO(json.dumps({"hits": {"hits": page[:1]}}).encode())
+
+        with mock.patch.object(verifier.urllib.request, "urlopen", side_effect=search):
+            documents = list(verifier.fetch_from_elasticsearch("https://example.test", "fake", "test-index"))
+        self.assertEqual(3, len(documents))
+        self.assertEqual([{"seq": "asc"}, {"doc_id": "asc"}], requests[0]["sort"])
+        status, output = self.verify(documents)
+        self.assertEqual(1, status)
+        self.assertIn("duplicate or out-of-order sequence", output)
+
 
 if __name__ == "__main__":
     unittest.main()
